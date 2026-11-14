@@ -165,3 +165,20 @@ def test_ic_in_other_text_fields_is_redacted(dataset, labels, tmp_path, product)
     for text in (posted.text, fetched.text):
         assert SYNTHETIC_IC not in text
     assert SYNTHETIC_IC.encode() not in (tmp_path / "t.db").read_bytes()
+
+
+def test_access_log_filter_masks_ic_in_path(dataset, tmp_path):
+    create_app(tmp_path / "t.db", dataset / "policies.jsonl")
+    record = logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        __file__,
+        0,
+        '%s - "%s %s"',
+        ("127.0.0.1", "GET", f"/v1/claims/{SYNTHETIC_IC}"),
+        None,
+    )
+    for f in logging.getLogger("uvicorn.access").filters:
+        f.filter(record)
+    assert SYNTHETIC_IC not in record.getMessage()
+    assert "XXXXXX-XX-1234" in record.getMessage()
