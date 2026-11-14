@@ -1,4 +1,4 @@
-"""CLI: run one claim packet folder through the intake pipeline.
+"""CLI: run one claim packet folder through intake and coverage (same as POST /v1/claims).
 
     python -m claims.intake data/claims/CLM-0001/ [--register PATH] [--db PATH] [--trace]
 
@@ -19,8 +19,8 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from claims.coverage import CoverageContext, assess_claim
 from claims.normalize import redact_ics
-from claims.pipeline import run_intake
 from claims.providers import get_provider
 from claims.schemas import ClaimRequest, ClaimResponse
 from claims.storage import ClaimStore, DuplicateClaimError
@@ -65,7 +65,12 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    claim = run_intake(request.claim_id, request.documents, get_provider(), register)
+    try:
+        ctx = CoverageContext.load(args.register.parent, register)
+    except FileNotFoundError:
+        print("error: certificates or schedules not found next to the register", file=sys.stderr)
+        return 1
+    claim = assess_claim(request.claim_id, request.documents, get_provider(), ctx)
     if args.db:
         try:
             ClaimStore(args.db).save(claim, request.documents)

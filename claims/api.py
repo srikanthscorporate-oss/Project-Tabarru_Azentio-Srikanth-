@@ -7,6 +7,11 @@ POST /v1/claims   201 with the claim; 409 if the claim_id already exists;
                   IC-shaped text in error locations is masked).
 Error messages never echo the claim_id.
 GET  /v1/claims/{claim_id}   200 with the claim and its trace; 404 if unknown.
+GET  /v1/adjuster/queue      200 with pending_adjuster claims and recommendations.
+POST /v1/claims/{claim_id}/adjuster-decision
+                  200 with the decided claim; 404 unknown; 409 not pending
+                  (already decided); 422 invalid or inconsistent decision.
+POST runs intake then coverage; every claim ends pending_adjuster.
 """
 
 from __future__ import annotations
@@ -19,11 +24,19 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from claims.coverage import CoverageContext, assess_claim
 from claims.normalize import redact_ics
-from claims.pipeline import run_intake
 from claims.providers import LLMProvider, get_provider
-from claims.schemas import ClaimDetail, ClaimRequest, ClaimResponse
-from claims.storage import ClaimStore, DuplicateClaimError
+from claims.schemas import (
+    AdjusterDecisionRecord,
+    AdjusterDecisionRequest,
+    ClaimDetail,
+    ClaimRequest,
+    ClaimResponse,
+    Decision,
+    QueueItem,
+)
+from claims.storage import AlreadyDecidedError, ClaimNotFoundError, ClaimStore, DuplicateClaimError
 from claims.validation import load_register
 
 
@@ -46,10 +59,14 @@ def create_app(
     db_path: Path | str | None = None,
     register_path: Path | str | None = None,
     provider: LLMProvider | None = None,
+    data_dir: Path | str | None = None,
 ) -> FastAPI:
     store = ClaimStore(db_path or os.environ.get("CLAIMS_DB", "data/claims.db"))
-    register = load_register(
-        Path(register_path or os.environ.get("CLAIMS_REGISTER", "data/policies.jsonl"))
+    register_file = Path(register_path or os.environ.get("CLAIMS_REGISTER", "data/policies.jsonl"))
+    register = load_register(register_file)
+    # Certificates and schedules sit next to the register unless CLAIMS_DATA says otherwise.
+    ctx = CoverageContext.load(
+        data_dir or os.environ.get("CLAIMS_DATA") or register_file.parent, register
     )
     llm = provider or get_provider()
     _redact_access_log()
@@ -74,7 +91,7 @@ def create_app(
     def submit_claim(request: ClaimRequest) -> ClaimResponse:
         if store.exists(request.claim_id):
             raise HTTPException(409, "claim already exists")
-        claim = run_intake(request.claim_id, request.documents, llm, register)
+        claim = assess_claim(request.claim_id, request.documents, llm, ctx)
         try:
             store.save(claim, request.documents)
         except DuplicateClaimError:
@@ -88,4 +105,52 @@ def create_app(
             raise HTTPException(404, "claim not found")
         return claim
 
+    @app.get("/v1/adjuster/queue", response_model=list[QueueItem])
+    def adjuster_queue() -> list[dict]:
+        return store.queue()
+
+    @app.post("/v1/claims/{claim_id}/adjuster-decision", response_model=ClaimDetail)
+    def adjuster_decision(claim_id: str, body: AdjusterDecisionRequest) -> ClaimDetail:
+        claim = store.get(claim_id)
+        if claim is None:
+            raise HTTPException(404, "claim not found")
+        if claim.status != "pending_adjuster" or claim.recommendation is None:
+            raise HTTPException(409, "claim is not pending an adjuster decision")
+        record = _decision_record(body, claim)
+        try:
+            store.decide(claim_id, record)
+        except ClaimNotFoundError:
+            raise HTTPException(404, "claim not found") from None
+        except AlreadyDecidedError:
+            raise HTTPException(409, "claim is not pending an adjuster decision") from None
+        return store.get(claim_id)
+
     return app
+
+
+def _decision_record(body: AdjusterDecisionRequest, claim: ClaimDetail) -> AdjusterDecisionRecord:
+    """Check the decision against the recommendation; HTTP 422 when inconsistent."""
+    rec = claim.recommendation
+    reason = redact_ics(body.reason.strip()) if body.reason and body.reason.strip() else None
+    if body.action == "approve":
+        decision = body.final_decision or rec.decision
+        payable = rec.payable_amount if body.final_payable is None else body.final_payable
+        if decision != rec.decision or payable != rec.payable_amount:
+            raise HTTPException(422, "approve must match the recommendation; use override")
+    else:
+        if reason is None:
+            raise HTTPException(422, "override requires a non-empty reason")
+        if body.final_decision is None or body.final_payable is None:
+            raise HTTPException(422, "override requires final_decision and final_payable")
+        decision, payable = body.final_decision, body.final_payable
+    if decision in (Decision.NOT_COVERED, Decision.REFER) and payable != 0:
+        raise HTTPException(422, "final_payable must be 0.00 for NOT_COVERED and REFER")
+    if decision in (Decision.COVERED, Decision.PARTIALLY_COVERED) and payable <= 0:
+        raise HTTPException(422, "final_payable must be above 0.00 for a covered decision")
+    return AdjusterDecisionRecord(
+        adjuster=redact_ics(body.adjuster),
+        action=body.action,
+        final_decision=decision,
+        final_payable=payable,
+        reason=reason,
+    )

@@ -25,7 +25,15 @@ def test_cli_prints_response_json(dataset, labels, capsys, product):
     label = first_label(labels, "clean", product)
     assert run_cli(dataset, label["claim_id"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert set(out) == {"claim_id", "status", "documents", "fields", "reason_codes"}
+    assert set(out) == {
+        "claim_id",
+        "status",
+        "documents",
+        "fields",
+        "reason_codes",
+        "intake_status",
+        "recommendation",
+    }
     assert out["claim_id"] == label["claim_id"]
     assert out["fields"]["product"] == product
 
