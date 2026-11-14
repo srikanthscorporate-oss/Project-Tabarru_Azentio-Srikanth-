@@ -3,11 +3,13 @@
 import json
 import logging
 
+import pytest
 from fastapi.testclient import TestClient
 
 from claims.api import create_app
 from claims.intake import main as intake_main
 from claims.pipeline import run_intake
+from claims.providers import FakeProvider
 from tests.conftest import first_label, load_packet
 
 
@@ -58,3 +60,108 @@ def test_successful_path_does_not_store_or_log_ic(dataset, labels, tmp_path, cap
     assert json.loads(out)["fields"]["participant_ic"] == "XXXXXX-XX-" + ic[-4:]
     assert ic not in out and ic not in caplog.text
     assert ic.encode() not in db.read_bytes()
+
+
+SYNTHETIC_IC = "900101-00-1234"  # place code 00 is never issued
+
+
+def test_422_does_not_echo_ic_used_as_property_name(dataset, tmp_path):
+    client = TestClient(create_app(tmp_path / "t.db", dataset / "policies.jsonl"))
+    body = {
+        "claim_id": "C1",
+        SYNTHETIC_IC: 1,
+        "documents": [{"doc_id": "d1", "text": "x", SYNTHETIC_IC: {"nested": SYNTHETIC_IC}}],
+    }
+    response = client.post("/v1/claims", json=body)
+    assert response.status_code == 422
+    assert SYNTHETIC_IC not in response.text
+    locs = [err["loc"] for err in response.json()["detail"]]
+    assert ["body", "XXXXXX-XX-1234"] in locs  # structure is kept, the IC is masked
+    assert ["body", "documents", 0, "XXXXXX-XX-1234"] in locs
+
+
+@pytest.mark.parametrize("field", ["claim_id", "doc_id"])
+def test_ic_shaped_ids_are_rejected(dataset, tmp_path, field):
+    client = TestClient(create_app(tmp_path / "t.db", dataset / "policies.jsonl"))
+    ids = {"claim_id": "C1", "doc_id": "d1", field: SYNTHETIC_IC.replace("-", "")}
+    body = {"claim_id": ids["claim_id"], "documents": [{"doc_id": ids["doc_id"], "text": "x"}]}
+    response = client.post("/v1/claims", json=body)
+    assert response.status_code == 422
+    assert SYNTHETIC_IC.replace("-", "") not in response.text
+
+
+def test_404_does_not_echo_path(dataset, tmp_path):
+    client = TestClient(create_app(tmp_path / "t.db", dataset / "policies.jsonl"))
+    response = client.get(f"/v1/claims/{SYNTHETIC_IC}")
+    assert response.status_code == 404
+    assert SYNTHETIC_IC not in response.text
+
+
+def test_cli_rejects_ic_shaped_folder_name(dataset, labels, tmp_path, capsys):
+    label = first_label(labels, "clean", "MOTOR")
+    packet = tmp_path / SYNTHETIC_IC
+    packet.mkdir()
+    for f in (dataset / "claims" / label["claim_id"]).glob("*.txt"):
+        (packet / f.name).write_text(f.read_text())
+    code = intake_main([str(packet), "--register", str(dataset / "policies.jsonl")])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert SYNTHETIC_IC not in captured.out + captured.err
+
+
+class KeyEchoProvider(FakeProvider):
+    """Answers with an extra key named after an IC, so validation errors carry it."""
+
+    def __init__(self):
+        super().__init__()
+        self.prompts = []
+
+    def complete(self, prompt):
+        self.prompts.append(prompt)
+        answer = json.loads(super().complete(prompt))
+        answer[SYNTHETIC_IC] = "x"
+        return json.dumps(answer)
+
+
+def test_retry_feedback_masks_ic_in_error_locations(dataset, labels, register, caplog):
+    label = first_label(labels, "clean", "MEDICAL")
+    caplog.set_level(logging.DEBUG)
+    provider = KeyEchoProvider()
+    claim = run_intake(
+        label["claim_id"], load_packet(dataset, label["claim_id"]), provider, register
+    )
+    assert claim.status == "failed"
+    retry_prompts = [p for p in provider.prompts if "previous answer was rejected" in p]
+    assert retry_prompts
+    for prompt in retry_prompts:
+        feedback = prompt.split("<<<DOCUMENT")[0]  # the document text itself may hold an IC
+        assert SYNTHETIC_IC not in feedback
+        assert "XXXXXX-XX-1234: extra_forbidden" in feedback
+    assert SYNTHETIC_IC not in claim.model_dump_json() and SYNTHETIC_IC not in caplog.text
+
+
+class IcInTextFieldsProvider(FakeProvider):
+    """Valid answers, but the model copied an IC into free-text fields."""
+
+    def complete(self, prompt):
+        answer = json.loads(super().complete(prompt))
+        for key in ("participant_name", "diagnosis", "cause_of_loss"):
+            if key in answer:
+                answer[key] = f"see {SYNTHETIC_IC}"
+        return json.dumps(answer)
+
+
+@pytest.mark.parametrize("product", ["MEDICAL", "MOTOR"])
+def test_ic_in_other_text_fields_is_redacted(dataset, labels, tmp_path, product):
+    label = first_label(labels, "clean", product)
+    app = create_app(tmp_path / "t.db", dataset / "policies.jsonl", IcInTextFieldsProvider())
+    client = TestClient(app)
+    docs = load_packet(dataset, label["claim_id"])
+    body = {"claim_id": label["claim_id"], "documents": [d.model_dump() for d in docs]}
+    posted = client.post("/v1/claims", json=body)
+    fetched = client.get(f"/v1/claims/{label['claim_id']}")
+    assert posted.status_code == 201
+    assert posted.json()["fields"]["participant_name"] == "see XXXXXX-XX-1234"
+    for text in (posted.text, fetched.text):
+        assert SYNTHETIC_IC not in text
+    assert SYNTHETIC_IC.encode() not in (tmp_path / "t.db").read_bytes()
