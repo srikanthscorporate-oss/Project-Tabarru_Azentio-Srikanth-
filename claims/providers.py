@@ -295,7 +295,9 @@ def assess_coverage(claim: dict, clauses: list[dict]) -> dict:
     """
 
     def find(phrase: str) -> dict | None:
-        return next((c for c in clauses if phrase in c["text"].lower()), None)
+        # Match the clause title (text before the first full stop), not the body:
+        # "own damage" also appears in the body of the collision excess clause.
+        return next((c for c in clauses if phrase in c["text"].split(".")[0].lower()), None)
 
     def answer(decision: str, clause: dict | None, why: str) -> dict:
         if clause is None and decision != "COVERED":
