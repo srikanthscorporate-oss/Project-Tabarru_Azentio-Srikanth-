@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import shutil
 from dataclasses import dataclass, field
@@ -45,6 +46,9 @@ CAUSES = [
 ACCIDENT_DIAGNOSIS = "Fractured left radius after road accident"
 WORKSHOPS = ["Bengkel Contoh Jaya", "Specimen Auto Works"]
 PLATE_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXY"  # Malaysian plates skip I and O
+# Share of documents that get OCR noise. Chosen by a seeded sample rather than a
+# per-document coin flip, so every run meets the 25% minimum, even a small one.
+NOISE_SHARE = 0.4
 
 # Scenario per claim index, cycling every ten claims: 6 clean, 1 of each anomaly.
 SCENARIO_CYCLE = [
@@ -425,19 +429,21 @@ def write_dataset(count: int, seed: int, out: Path) -> None:
         shutil.rmtree(claims_dir)  # stale folders from an earlier run would break reproducibility
     claims_dir.mkdir(parents=True)
 
-    labels, noisy_docs, total_docs = [], 0, 0
+    total_docs = sum(len(c.doc_types) for c in claims)
+    noisy_positions = set(rng.sample(range(total_docs), math.ceil(total_docs * NOISE_SHARE)))
+
+    labels, position = [], 0
     for claim in claims:
         folder = claims_dir / claim.claim_id
         folder.mkdir()
         docs = []
         for doc_type in claim.doc_types:
             doc_id = f"{rng.randrange(16**8):08x}"
-            noisy = rng.random() < 0.4
+            noisy = position in noisy_positions
+            position += 1
             text = render(rng, claim, doc_type, noisy)
             (folder / f"{doc_id}.txt").write_text(text, encoding="utf-8", newline="\n")
             docs.append({"doc_id": doc_id, "doc_type": doc_type, "ocr_noise": noisy})
-            noisy_docs += noisy
-            total_docs += 1
         shown = set().union(*(FIELDS_SHOWN[d] for d in claim.doc_types))
         fields = {k: label_value(claim.facts.get(k)) for k in sorted(shown)}
         if claim.product == "MEDICAL":
@@ -473,7 +479,7 @@ def write_dataset(count: int, seed: int, out: Path) -> None:
     write_jsonl(out / "policies.jsonl", sorted(policies, key=lambda p: p["certificate_no"]))
     write_jsonl(out / "labels.jsonl", labels)
     print(
-        f"wrote {count} claims, {total_docs} documents ({noisy_docs} with OCR noise), "
+        f"wrote {count} claims, {total_docs} documents ({len(noisy_positions)} with OCR noise), "
         f"{len(policies)} certificates to {out}"
     )
 
