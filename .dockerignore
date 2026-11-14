@@ -1,0 +1,16 @@
+.git
+.venv
+.env
+.env.*
+!.env.example
+data/
+models/
+reports/
+artifacts/
+postman/
+.pytest_cache
+.ruff_cache
+.unlazy
+.taste-skill
+**/__pycache__
+*.db
