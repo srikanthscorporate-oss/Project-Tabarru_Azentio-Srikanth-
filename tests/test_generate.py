@@ -2,6 +2,8 @@ import json
 import re
 from collections import defaultdict
 
+import pytest
+
 from claims.generate import main, write_dataset
 
 
@@ -79,3 +81,11 @@ def test_answers_are_not_in_document_text(dataset, labels):
             text = (dataset / "claims" / lab["claim_id"] / f"{d['doc_id']}.txt").read_text()
             assert lab["scenario"] not in text
             assert d["doc_type"] not in text
+
+
+@pytest.mark.parametrize("claims, seed", [(1, 1), (2, 1), (2, 3), (3, 5), (40, 7)])
+def test_noise_share_is_guaranteed_for_small_runs(tmp_path, claims, seed):
+    write_dataset(claims, seed, tmp_path)
+    labels = [json.loads(line) for line in (tmp_path / "labels.jsonl").read_text().splitlines()]
+    docs = [d for lab in labels for d in lab["documents"]]
+    assert sum(d["ocr_noise"] for d in docs) / len(docs) >= 0.25
