@@ -26,6 +26,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -69,7 +70,7 @@ def _api_key(source: str) -> str | None:
 def list_models(source: str, timeout_s: float = 10) -> list[str]:
     """Model ids from the source's OpenAI-compatible /models endpoint."""
     key_var = SOURCES[source]["key_var"]
-    headers = {}
+    headers = {"User-Agent": "tabarru-claims/0.1"}
     if key_var:
         key = _api_key(source)
         if not key:
@@ -79,8 +80,11 @@ def list_models(source: str, timeout_s: float = 10) -> list[str]:
     try:
         with urllib.request.urlopen(request, timeout=timeout_s) as response:
             payload = json.load(response)
-    except Exception as exc:  # report the type only: messages can echo request details
-        raise RuntimeError(f"{source} model list unavailable ({type(exc).__name__})") from None
+    except Exception as exc:  # report the type and status only: messages can echo details
+        status = f" {exc.code}" if isinstance(exc, urllib.error.HTTPError) else ""
+        raise RuntimeError(
+            f"{source} model list unavailable ({type(exc).__name__}{status})"
+        ) from None
     return sorted(m["id"] for m in payload.get("data", []))
 
 
