@@ -6,7 +6,9 @@ from claims.generate import main, write_dataset
 
 
 def snapshot(root):
-    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+    return {
+        str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()
+    }
 
 
 def test_same_seed_gives_byte_identical_output(tmp_path):
@@ -33,7 +35,7 @@ def test_different_seed_gives_different_data(tmp_path):
 def test_layout_matches_assignment(dataset, labels):
     folders = sorted((dataset / "claims").iterdir())
     assert len(folders) == len(labels) == 40
-    for folder, label in zip(folders, labels):
+    for folder, label in zip(folders, labels, strict=True):
         files = sorted(folder.glob("*.txt"))
         assert 2 <= len(files) <= 4
         assert folder.name == label["claim_id"]

@@ -65,7 +65,9 @@ def test_unreachable_real_provider_fails_documents_without_fallback(dataset, lab
     with pytest.raises(ProviderError):
         provider.complete("hello")
     label = first_label(labels, "clean", "MOTOR")
-    claim = run_intake(label["claim_id"], load_packet(dataset, label["claim_id"]), provider, register)
+    claim = run_intake(
+        label["claim_id"], load_packet(dataset, label["claim_id"]), provider, register
+    )
     assert claim.status == "failed"
     assert all(d.doc_type is None for d in claim.documents)
 

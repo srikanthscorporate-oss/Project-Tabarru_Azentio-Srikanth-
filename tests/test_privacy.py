@@ -50,7 +50,9 @@ def test_successful_path_does_not_store_or_log_ic(dataset, labels, tmp_path, cap
     db = tmp_path / "cli.db"
     packet = dataset / "claims" / label["claim_id"]
 
-    code = intake_main([str(packet), "--register", str(dataset / "policies.jsonl"), "--db", str(db), "--trace"])
+    code = intake_main(
+        [str(packet), "--register", str(dataset / "policies.jsonl"), "--db", str(db), "--trace"]
+    )
     out = capsys.readouterr().out
     assert code == 0
     assert json.loads(out)["fields"]["participant_ic"] == "XXXXXX-XX-" + ic[-4:]

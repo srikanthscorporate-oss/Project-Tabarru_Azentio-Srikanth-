@@ -30,7 +30,9 @@ def doc_types(label):
 @pytest.mark.parametrize("product", ["MEDICAL", "MOTOR"])
 def test_complete_packet(dataset, labels, register, product):
     label = first_label(labels, "clean", product)
-    claim = run_intake(label["claim_id"], load_packet(dataset, label["claim_id"]), FakeProvider(), register)
+    claim = run_intake(
+        label["claim_id"], load_packet(dataset, label["claim_id"]), FakeProvider(), register
+    )
 
     assert claim.status == "intake_complete"
     assert claim.reason_codes == []
@@ -49,7 +51,9 @@ def test_every_generated_claim_matches_its_labels(dataset, labels, register):
             label["claim_id"], load_packet(dataset, label["claim_id"]), FakeProvider(), register
         )
         assert {d.doc_id: d.doc_type.value for d in claim.documents} == doc_types(label)
-        assert sorted(claim.reason_codes) == sorted(label["expected_reason_codes"]), label["claim_id"]
+        assert sorted(claim.reason_codes) == sorted(label["expected_reason_codes"]), label[
+            "claim_id"
+        ]
 
 
 @pytest.mark.parametrize(
@@ -57,7 +61,9 @@ def test_every_generated_claim_matches_its_labels(dataset, labels, register):
 )
 def test_reason_code_scenarios_are_flagged(dataset, labels, register, scenario):
     label = first_label(labels, scenario)
-    claim = run_intake(label["claim_id"], load_packet(dataset, label["claim_id"]), FakeProvider(), register)
+    claim = run_intake(
+        label["claim_id"], load_packet(dataset, label["claim_id"]), FakeProvider(), register
+    )
     code = {
         "cert_not_found": "CERT_NOT_FOUND",
         "missing_document": "MISSING_DOCUMENT",
@@ -87,7 +93,10 @@ def test_malformed_twice_fails_document_and_flags_claim(dataset, labels, registe
     label = first_label(labels, "clean", "MOTOR")
     docs = load_packet(dataset, label["claim_id"])
     claim = run_intake(
-        label["claim_id"], docs, FakeProvider(faults={1: "malformed_json", 2: "malformed_json"}), register
+        label["claim_id"],
+        docs,
+        FakeProvider(faults={1: "malformed_json", 2: "malformed_json"}),
+        register,
     )
 
     failed = [d for d in claim.documents if d.status == "failed"]
@@ -116,7 +125,10 @@ def test_missing_field_twice_fails_extraction_only(dataset, labels, register):
     docs = load_packet(dataset, label["claim_id"])
     n = len(docs)
     claim = run_intake(
-        label["claim_id"], docs, FakeProvider(faults={n + 1: "missing_field", n + 2: "missing_field"}), register
+        label["claim_id"],
+        docs,
+        FakeProvider(faults={n + 1: "missing_field", n + 2: "missing_field"}),
+        register,
     )
     first = claim.documents[0]
     assert first.status == "failed"
@@ -150,7 +162,9 @@ def test_raising_provider_is_not_replaced_by_fake_answers(dataset, labels, regis
             raise ConnectionError("upstream down")
 
     label = first_label(labels, "clean", "MEDICAL")
-    claim = run_intake(label["claim_id"], load_packet(dataset, label["claim_id"]), Broken(), register)
+    claim = run_intake(
+        label["claim_id"], load_packet(dataset, label["claim_id"]), Broken(), register
+    )
     assert claim.status == "failed"
     assert "provider error (ConnectionError)" in claim.trace[0].error
     assert claim.fields.certificate_no is None
@@ -220,7 +234,10 @@ def test_clean_hand_built_claim_has_no_codes():
 
 
 def test_cert_not_found():
-    assert "CERT_NOT_FOUND" in validate(*med_extractions(certificate_no="MED-2026-999999"), REGISTER)[1]
+    assert (
+        "CERT_NOT_FOUND"
+        in validate(*med_extractions(certificate_no="MED-2026-999999"), REGISTER)[1]
+    )
 
 
 def test_discharge_before_admission():
