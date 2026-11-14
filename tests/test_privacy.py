@@ -182,3 +182,13 @@ def test_access_log_filter_masks_ic_in_path(dataset, tmp_path):
         f.filter(record)
     assert SYNTHETIC_IC not in record.getMessage()
     assert "XXXXXX-XX-1234" in record.getMessage()
+
+
+@pytest.mark.parametrize("ic", ["850101.14.5678", "850101.145678", "850101-14.5678"])
+def test_dotted_ic_forms_are_redacted(ic):
+    from claims.normalize import contains_ic, redact_ics
+
+    text = f"Rationale mentions participant {ic} in passing."
+    assert contains_ic(text)
+    out = redact_ics(text)
+    assert "XXXXXX-XX-5678" in out and "850101" not in out

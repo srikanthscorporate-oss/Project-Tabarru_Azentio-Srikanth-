@@ -82,7 +82,7 @@ def to_money(value: Decimal) -> Decimal:
 
 
 _IC_PATTERN = re.compile(
-    r"(?<![0-9A-Za-z])[0-9OoIl]{6}[- ]?[0-9OoIl]{2}[- ]?([0-9OoIl]{4})(?![0-9A-Za-z])"
+    r"(?<![0-9A-Za-z])[0-9OoIl]{6}[-. ]?[0-9OoIl]{2}[-. ]?([0-9OoIl]{4})(?![0-9A-Za-z])"
 )
 
 
