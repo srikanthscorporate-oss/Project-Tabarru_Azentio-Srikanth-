@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ValidationError
 
+from claims.classifier import ClassifierConfig
 from claims.normalize import mask_ic, redact_ics
 from claims.providers import LLMProvider, Task, build_prompt
 from claims.schemas import (
@@ -105,9 +106,19 @@ def call_with_retry(
     return None, error
 
 
-def classify_documents(docs: list[DocState], provider: LLMProvider) -> TraceEntry:
+def classify_documents(
+    docs: list[DocState], provider: LLMProvider, classifier: ClassifierConfig | None = None
+) -> TraceEntry:
+    """Type each document. In trained mode, and in hybrid mode at or above the
+    threshold, the trained model answers and the provider is not called;
+    otherwise the provider answers through call_with_retry."""
     step = _Step("classify_documents", [d.doc_id for d in docs])
     for doc in docs:
+        if classifier is not None and classifier.mode != "llm":
+            doc_type, confidence = classifier.model.predict(doc.text)
+            if classifier.accept(confidence):
+                doc.doc_type = doc_type
+                continue
         result, error = call_with_retry(
             provider, step, "classify_document", ClassifyOutput, doc.text
         )
@@ -148,10 +159,13 @@ def run_intake(
     documents: list[InputDocument],
     provider: LLMProvider,
     register: dict[str, dict],
+    classifier: ClassifierConfig | None = None,
 ) -> ClaimDetail:
-    """Process one claim packet. Never raises on bad model output."""
+    """Process one claim packet. Never raises on bad model output.
+
+    classifier only changes classify_documents; extraction always uses provider."""
     docs = [DocState(d.doc_id, d.text) for d in documents]
-    trace = [classify_documents(docs, provider), extract_fields(docs, provider)]
+    trace = [classify_documents(docs, provider, classifier), extract_fields(docs, provider)]
 
     processed = [d for d in docs if d.processed]
     step = _Step("validate", [d.doc_id for d in processed])

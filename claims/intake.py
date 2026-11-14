@@ -19,6 +19,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from claims.classifier import ClassifierConfigError, get_classifier_config
 from claims.coverage import CoverageContext, assess_claim
 from claims.normalize import redact_ics
 from claims.providers import get_provider
@@ -70,7 +71,12 @@ def main(argv: list[str] | None = None) -> int:
     except FileNotFoundError:
         print("error: certificates or schedules not found next to the register", file=sys.stderr)
         return 1
-    claim = assess_claim(request.claim_id, request.documents, get_provider(), ctx)
+    try:
+        classifier = get_classifier_config()
+    except ClassifierConfigError as exc:
+        print(f"error: {redact_ics(str(exc))}", file=sys.stderr)
+        return 1
+    claim = assess_claim(request.claim_id, request.documents, get_provider(), ctx, classifier)
     if args.db:
         try:
             ClaimStore(args.db).save(claim, request.documents)
