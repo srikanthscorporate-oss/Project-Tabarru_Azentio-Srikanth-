@@ -73,6 +73,46 @@ per finding.
   which are marked `fmt: skip`. Line length is left to `ruff format` and E501
   is turned off.
 
+## Second review pass (privacy and requirement audit)
+
+A later Claude Code session was asked to re-check Task 1 against the PDF line
+by line, treating the README's claims as unproven, and to close a known
+privacy gap. Prompt, abridged:
+
+> Review and finish Task 1 ... Treat the PDF as the source of truth ... the
+> RequestValidationError handler returns err["loc"] unchanged ... sanitize ...
+> audit IC handling across the complete output boundary ... recheck every
+> Task 1 requirement ... the generator chooses noise probabilistically, check
+> whether it guarantees the minimum ... do not implement Tasks 2 or 3.
+
+What it found, each reproduced with a failing test before the fix:
+
+* **422 echoed an IC used as a JSON key.** `{"900101-00-1234": 1}` came back
+  in `detail[].loc`. The first version of the handler (also AI-written) only
+  dropped `input` and missed that key names are user input too.
+* **Retry feedback copied model-invented keys** into the prompt and trace.
+* **IC-shaped `claim_id` / `doc_id`** were accepted and echoed in responses,
+  the trace, logs and the 404 message. They are now rejected.
+* **An IC in another text field** (name, diagnosis, cause of loss) from a
+  model passed straight through to the response and database.
+* **uvicorn's access log** printed an IC-shaped request path. This was not in
+  the test suite at all; it showed up only when the server was run for real
+  and its log grepped. Fixed with a logging filter.
+* **The CLI did not validate `claim_id`** (the folder name) while the API did.
+  It now builds the same `ClaimRequest` model.
+* **Noise share was not guaranteed.** The 40% coin flip gave 1 of 6 noisy
+  documents for `--claims 2 --seed 1`. The earlier README said "about 40%"
+  and the existing test only checked seed 7, so it passed. Now a seeded
+  sample of exactly ceil(40%).
+
+The new tests were run against the old code to confirm they fail (8 privacy
+tests, 4 noise tests) before the fixes were applied.
+
+Limits of that pass: the suite was run on Python 3.12 only. Python 3.10
+wheels were not in the local cache and nothing was downloaded, so 3.10 was
+checked by parsing every module with the 3.10 interpreter, not by running
+tests. No live model was called.
+
 ## What I would not trust without checking
 
 The FakeProvider recovers every field and reason code on the 40 generated

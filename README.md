@@ -62,7 +62,9 @@ Five document types with two layouts each (for example "CLAIM FORM" with
 a list or as a `|` table; a discharge summary as fields or as prose). Every
 document picks its date format (`03/04/2026`, `3-Apr-2026`, `2026-04-03`,
 `3 April 2026`) and amount format (`RM 1,250.00`, `1250`, `MYR 1,250.00`) at
-random. About 40% of documents (55 of 124 for seed 7) also get OCR noise: an
+random. Exactly ceil(40%) of documents (50 of 124 for seed 7) also get OCR
+noise, picked with a seeded sample so even a two-claim run meets the 25%
+minimum: an
 O/0 or I/1 swap inside numeric values, an extra scan header and footer, and,
 for half of those, shuffled lines.
 
@@ -81,7 +83,9 @@ deletes both from reach and gets the same result).
 * `claim_id` is the folder name, `doc_id` is each file's stem. File names are
   never used to guess document type.
 * Exit 0 on success, 1 if the folder has no `.txt` files, the register is
-  missing, or a file name is not a valid id. With `--db`, a claim already stored
+  missing, or the folder name, a file name or a file's text fails the same
+  `ClaimRequest` validation as `POST /v1/claims` (so the CLI and API accept
+  the same packets and print the same JSON, which a test asserts). With `--db`, a claim already stored
   exits 2 and nothing is overwritten.
 * `--trace` adds the trace (same shape as `GET /v1/claims/{id}`).
 
@@ -108,9 +112,9 @@ returns 201 and
 
 | Case | Response |
 | --- | --- |
-| Unknown claim_id on GET | 404 |
+| Unknown claim_id on GET | 404 `claim not found` (the id is not echoed) |
 | claim_id already stored | 409, the stored claim is unchanged |
-| Invalid body (missing keys, extra keys, 0 or more than 10 documents, duplicate doc_id, ids outside `[A-Za-z0-9_.-]`, empty or >100k char text) | 422 with `loc`, `type`, `msg` only. The default FastAPI 422 echoes the input, which could contain an IC, so it is replaced. |
+| Invalid body (missing keys, extra keys, 0 or more than 10 documents, duplicate doc_id, ids outside `[A-Za-z0-9_.-]` or containing an IC-shaped number, empty or >100k char text) | 422 with `loc`, `type`, `msg` only. The default FastAPI 422 echoes the input, which could contain an IC, so it is replaced. String parts of `loc` and `msg` go through IC redaction, because an unexpected key name is user input. |
 | Model output is bad | Never an error: the document is marked failed and the claim flagged |
 
 Amounts are serialised as strings with two decimals (`"1250.00"`) so no float
@@ -258,9 +262,24 @@ patterns. A real model on unseen layouts would not score like this.
   response or the database through the claim record.
 * Stored document text has every IC-shaped number redacted (including OCR
   variants like `9OO1O1-00-I234`).
-* Trace errors are built without input values and then also redacted.
-* Logs contain claim id, status, reason codes and failed doc ids only.
-* The custom 422 handler drops `input`.
+* Every other text field (participant_name, diagnosis, cause_of_loss and so
+  on) is passed through the same redaction in `assemble_claim`, in case a
+  model copies an IC into it.
+* Retry feedback and trace errors are built from error locations and types
+  only, and the locations are redacted before they enter the prompt, because a
+  model can invent a key such as `"900101-00-1234"`.
+* `claim_id` and `doc_id` are rejected (422 in the API, exit 1 in the CLI) if
+  they contain an IC-shaped number, since ids are echoed in responses, the
+  trace and logs. This is a deliberate rejection; ordinary ids such as
+  `CLM-0001` or `42c927b9` are unaffected. 404 and 409 messages do not echo the
+  id.
+* Logs contain claim id, status, reason codes and failed doc ids only. The app
+  adds a filter to the `uvicorn.access` logger that masks IC-shaped text in the
+  request path.
+* The custom 422 handler drops `input` and redacts `loc` and `msg`.
+
+All of this uses one function, `normalize.redact_ics`, so there is a single
+definition of what an IC looks like.
 
 Tests check the response bodies, trace, logs and raw SQLite bytes for the full
 IC on both a successful path and a misbehaving provider that echoes the IC
@@ -286,7 +305,7 @@ this round, so its accuracy is unmeasured.
 
 ## Tests
 
-`uv run pytest` runs 74 tests in under a second. An autouse fixture removes
+`uv run pytest` runs 91 tests in under a second. An autouse fixture removes
 every `CLAIMS_*` variable and patches `socket` so any network connection
 raises; the real adapter test relies on that to prove it fails cleanly.
 Each test that touches SQLite uses its own `tmp_path` database, and the
@@ -302,7 +321,9 @@ dataset is generated once per session into a temp folder.
 | Each reason code | `test_reason_code_scenarios_are_flagged[...]` (generated packets) and hand-built rule tests, including the 1% boundary |
 | All documents failing | `test_all_documents_failing_gives_failed_claim` |
 | POST then GET, shape, four trace steps, masked IC | `test_api.py::test_post_then_get` |
-| No full IC in logs, trace, errors, DB | `test_privacy.py` |
+| No full IC in logs, trace, errors, DB | `test_privacy.py` (including an IC as an unexpected JSON key, IC-shaped ids, an IC in free-text model fields, retry feedback and the access log) |
+| At least 25% OCR noise, even for small runs | `test_generate.py::test_noise_share_is_guaranteed_for_small_runs` |
+| CLI prints the same JSON as the API | `test_cli_and_providers.py::test_cli_output_equals_api_post_response` |
 | Provider ignores labels, generator and file names | `test_fake_works_without_labels_or_generator`, `test_fake_ignores_file_names_and_packet_order` |
 
 No test needs a marker: nothing uses live services.
