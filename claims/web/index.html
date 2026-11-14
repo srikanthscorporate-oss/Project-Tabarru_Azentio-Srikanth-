@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tabarru adjuster review</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="bar">
+    <p class="wordmark">Tabarru adjuster review</p>
+    <p class="specimen" title="Every claim, certificate and participant here is synthetic test data">
+      Specimen data. Not for real claims. Payments are not made here.
+    </p>
+    <nav class="bar-links" aria-label="Tools">
+      <a href="/docs">API docs</a>
+      <a href="/metrics">Metrics</a>
+    </nav>
+  </header>
+
+  <main class="workspace">
+    <section class="queue" aria-labelledby="queue-title">
+      <div class="queue-head">
+        <h1 id="queue-title">Pending review</h1>
+        <button type="button" class="btn btn-quiet" id="refresh">Refresh</button>
+      </div>
+      <form class="filters" id="filters" role="search" onsubmit="return false">
+        <label for="search">Search by claim ID</label>
+        <input id="search" type="search" autocomplete="off" placeholder="CLM-0001">
+        <div class="filter-row">
+          <div>
+            <label for="product">Product</label>
+            <select id="product">
+              <option value="">All</option>
+              <option value="MEDICAL">Medical</option>
+              <option value="MOTOR">Motor</option>
+            </select>
+          </div>
+          <div>
+            <label for="decision">Recommendation</label>
+            <select id="decision">
+              <option value="">All</option>
+              <option value="COVERED">Covered</option>
+              <option value="PARTIALLY_COVERED">Partially covered</option>
+              <option value="NOT_COVERED">Not covered</option>
+              <option value="REFER">Needs review</option>
+            </select>
+          </div>
+        </div>
+      </form>
+      <p class="queue-summary" id="queue-summary" aria-live="polite"></p>
+      <ul class="queue-list" id="queue-list" aria-label="Pending claims"></ul>
+
+      <h2 class="queue-sub">Opened this session</h2>
+      <p class="hint">Claims you decided or looked up stay here after they leave the queue.</p>
+      <ul class="queue-list" id="recent-list" aria-label="Claims opened this session"></ul>
+      <form class="lookup" id="lookup">
+        <label for="lookup-id">Open any claim by ID</label>
+        <div class="lookup-row">
+          <input id="lookup-id" autocomplete="off" required pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}">
+          <button type="submit" class="btn btn-quiet">Open</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="review" id="review" aria-live="polite" aria-busy="false">
+      <div class="empty-state">
+        <h2>Select a claim</h2>
+        <p>Choose a claim from the queue to review its facts, evidence and recommendation.</p>
+      </div>
+    </section>
+
+    <aside class="decision" id="decision-panel" aria-label="Decision"></aside>
+  </main>
+
+  <dialog id="confirm" aria-labelledby="confirm-title">
+    <form method="dialog" class="confirm-body">
+      <h2 id="confirm-title">Record this decision?</h2>
+      <dl class="confirm-summary" id="confirm-summary"></dl>
+      <p class="hint">This records a final decision for the claim. It does not make a payment.</p>
+      <div class="confirm-actions">
+        <button value="cancel" class="btn btn-quiet">Go back</button>
+        <button value="ok" class="btn btn-primary" id="confirm-ok">Record decision</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
