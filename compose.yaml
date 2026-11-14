@@ -1,0 +1,13 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      CLAIMS_PROVIDER: fake
+    volumes:
+      - tabarru-data:/data
+    restart: unless-stopped
+
+volumes:
+  tabarru-data:

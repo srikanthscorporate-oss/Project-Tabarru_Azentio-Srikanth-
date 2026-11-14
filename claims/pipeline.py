@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ValidationError
 
+from claims import metrics
 from claims.classifier import ClassifierConfig
 from claims.normalize import mask_ic, redact_ics
 from claims.providers import LLMProvider, Task, build_prompt
@@ -94,8 +95,10 @@ def call_with_retry(
 ) -> tuple[BaseModel | None, str | None]:
     """Ask the provider, validate, retry once. Returns (result, last error)."""
     error = None
-    for _ in range(MAX_ATTEMPTS):
+    for attempt in range(MAX_ATTEMPTS):
         step.calls += 1
+        if attempt:
+            metrics.record_retry(step.name)
         try:
             raw = provider.complete(build_prompt(task, text, doc_type, error))
             return schema.model_validate(json.loads(raw)), None

@@ -29,11 +29,12 @@ import argparse
 import json
 import sys
 import time
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 
 from claims.coverage import CoverageContext, assess_claim
-from claims.providers import FakeProvider, get_provider
+from claims.providers import FakeProvider, LLMProvider, get_provider
 from claims.schemas import Decision, InputDocument
 from claims.validation import load_register
 
@@ -45,11 +46,20 @@ def _ratio(num: int, den: int) -> float | None:
     return round(num / den, 4) if den else None
 
 
-def evaluate(data_dir: Path, provider_name: str) -> dict:
+def evaluate(
+    data_dir: Path,
+    provider_name: str,
+    make_provider: Callable[[], LLMProvider] | None = None,
+    limit: int | None = None,
+) -> dict:
+    """Score every labelled claim (or the first ``limit``).
+
+    make_provider overrides the provider choice; claims.models passes a real one.
+    """
     labels = [
         json.loads(line)
         for line in (data_dir / "labels.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
+    ][:limit]
     ctx = CoverageContext.load(data_dir, load_register(data_dir / "policies.jsonl"))
     matrix = {e: dict.fromkeys(DECISIONS, 0) for e in DECISIONS}
     correct = payable_ok = 0
@@ -57,7 +67,10 @@ def evaluate(data_dir: Path, provider_name: str) -> dict:
     called = final_invalid = attempted_invalid = 0
     for label in labels:
         # A fresh fake per claim keeps call numbering independent of claim order.
-        provider = FakeProvider() if provider_name == "fake" else get_provider()
+        if make_provider is not None:
+            provider = make_provider()
+        else:
+            provider = FakeProvider() if provider_name == "fake" else get_provider()
         folder = data_dir / "claims" / label["claim_id"]
         docs = [
             InputDocument(doc_id=p.stem, text=p.read_text(encoding="utf-8"))

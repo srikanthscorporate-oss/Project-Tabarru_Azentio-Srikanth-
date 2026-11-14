@@ -253,3 +253,53 @@ def test_eval_is_reproducible_and_offline(dataset, tmp_path):
         assert key in first
     assert sum(sum(row.values()) for row in first["confusion_matrix"].values()) == 40
     json.dumps(first)
+
+
+def test_zero_payable_partial_recommendation_can_be_approved(client, dataset, labels, db):
+    # Regression: an excess that absorbs the whole loss gives PARTIALLY_COVERED with
+    # 0.00 payable. Approving the stored recommendation must succeed, not 422.
+    from claims.api import _decision_record
+    from claims.schemas import AdjusterDecisionRequest, Decision
+
+    label = label_for(labels, "covered", "MEDICAL")
+    submit(client, dataset, label)
+    claim = ClaimStore(db).get(label["claim_id"])
+    rec = claim.recommendation.model_copy(
+        update={"decision": Decision.PARTIALLY_COVERED, "payable_amount": Decimal("0.00")}
+    )
+    claim = claim.model_copy(update={"recommendation": rec})
+    record = _decision_record(AdjusterDecisionRequest(adjuster="a", action="approve"), claim)
+    assert record.final_decision is Decision.PARTIALLY_COVERED
+    assert record.final_payable == Decimal("0.00")
+
+
+def test_override_to_zero_payable_partial_is_422(client, dataset, labels):
+    label = label_for(labels, "covered", "MEDICAL")
+    submit(client, dataset, label)
+    body = {
+        "adjuster": "a",
+        "action": "override",
+        "final_decision": "PARTIALLY_COVERED",
+        "final_payable": "0.00",
+        "reason": "excess absorbs the loss",
+    }
+    response = client.post(f"/v1/claims/{label['claim_id']}/adjuster-decision", json=body)
+    assert response.status_code == 422
+
+
+def test_approve_with_stale_payable_is_422(client, dataset, labels):
+    # The view sends the decision and payable it showed; a mismatch must not be recorded.
+    label = label_for(labels, "covered", "MEDICAL")
+    claim = submit(client, dataset, label)
+    rec = claim["recommendation"]
+    body = {
+        "adjuster": "a",
+        "action": "approve",
+        "final_decision": rec["decision"],
+        "final_payable": "1.23",
+    }
+    response = client.post(f"/v1/claims/{label['claim_id']}/adjuster-decision", json=body)
+    assert response.status_code == 422
+    body["final_payable"] = rec["payable_amount"]
+    response = client.post(f"/v1/claims/{label['claim_id']}/adjuster-decision", json=body)
+    assert response.status_code == 200

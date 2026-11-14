@@ -7,6 +7,11 @@ POST /v1/claims   201 with the claim; 409 if the claim_id already exists;
                   IC-shaped text in error locations is masked).
 Error messages never echo the claim_id.
 GET  /v1/claims/{claim_id}   200 with the claim and its trace; 404 if unknown.
+GET  /v1/claims/{claim_id}/audit  200 with the claim's audit events; 404 unknown.
+GET  /v1/certificates/{product}/clauses/{clause_id}
+                  200 with the clause from the current wording file; 404 unknown.
+GET  /metrics     Prometheus text format (see claims/metrics.py).
+GET  /            the adjuster view (static files in claims/web/).
 GET  /v1/adjuster/queue      200 with pending_adjuster claims and recommendations.
 POST /v1/claims/{claim_id}/adjuster-decision
                   200 with the decided claim; 404 unknown; 409 not pending
@@ -22,8 +27,10 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 
+from claims import metrics
 from claims.classifier import ClassifierConfig, get_classifier_config
 from claims.coverage import CoverageContext, assess_claim
 from claims.normalize import redact_ics
@@ -31,14 +38,19 @@ from claims.providers import LLMProvider, get_provider
 from claims.schemas import (
     AdjusterDecisionRecord,
     AdjusterDecisionRequest,
+    AuditEvent,
     ClaimDetail,
     ClaimRequest,
     ClaimResponse,
+    ClauseSource,
     Decision,
+    Product,
     QueueItem,
 )
 from claims.storage import AlreadyDecidedError, ClaimNotFoundError, ClaimStore, DuplicateClaimError
 from claims.validation import load_register
+
+WEB_DIR = Path(__file__).parent / "web"
 
 
 class RedactIcFilter(logging.Filter):
@@ -99,6 +111,8 @@ def create_app(
             store.save(claim, request.documents)
         except DuplicateClaimError:
             raise HTTPException(409, "claim already exists") from None
+        product = claim.fields.product.value if claim.fields.product else None
+        metrics.record_claim(claim.trace, product, claim.recommendation.reason_codes)
         return claim
 
     @app.get("/v1/claims/{claim_id}", response_model=ClaimDetail)
@@ -107,6 +121,36 @@ def create_app(
         if claim is None:
             raise HTTPException(404, "claim not found")
         return claim
+
+    @app.get("/v1/claims/{claim_id}/audit", response_model=list[AuditEvent])
+    def claim_audit(claim_id: str) -> list[dict]:
+        if not store.exists(claim_id):
+            raise HTTPException(404, "claim not found")
+        return store.audit(claim_id)
+
+    clauses = {
+        (product, c.clause_id): c.text for product, cs in ctx.index.clauses.items() for c in cs
+    }
+
+    @app.get("/v1/certificates/{product}/clauses/{clause_id}", response_model=ClauseSource)
+    def clause_source(product: Product, clause_id: str) -> ClauseSource:
+        # Dictionary lookup only: the path never reaches the filesystem.
+        text = clauses.get((product.value, clause_id))
+        if text is None:
+            raise HTTPException(404, "clause not found")
+        return ClauseSource(product=product, clause_id=clause_id, text=text)
+
+    @app.get("/metrics", response_class=PlainTextResponse)
+    def prometheus_metrics() -> PlainTextResponse:
+        return PlainTextResponse(
+            metrics.render(store.status_counts()), media_type="text/plain; version=0.0.4"
+        )
+
+    @app.get("/", include_in_schema=False)
+    def adjuster_view() -> FileResponse:
+        return FileResponse(WEB_DIR / "index.html")
+
+    app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
     @app.get("/v1/adjuster/queue", response_model=list[QueueItem])
     def adjuster_queue() -> list[dict]:
@@ -148,8 +192,14 @@ def _decision_record(body: AdjusterDecisionRequest, claim: ClaimDetail) -> Adjus
         decision, payable = body.final_decision, body.final_payable
     if decision in (Decision.NOT_COVERED, Decision.REFER) and payable != 0:
         raise HTTPException(422, "final_payable must be 0.00 for NOT_COVERED and REFER")
-    if decision in (Decision.COVERED, Decision.PARTIALLY_COVERED) and payable <= 0:
-        raise HTTPException(422, "final_payable must be above 0.00 for a covered decision")
+    # Zero-payable policy: the pipeline may recommend PARTIALLY_COVERED with 0.00
+    # (an excess that absorbs the whole loss); approving that stored
+    # recommendation is allowed. An adjuster override to PARTIALLY_COVERED or
+    # COVERED needs a payable above 0.00; a zero outcome is overridden as NOT_COVERED.
+    if decision is Decision.COVERED and payable <= 0:
+        raise HTTPException(422, "final_payable must be above 0.00 for COVERED")
+    if body.action == "override" and decision is Decision.PARTIALLY_COVERED and payable <= 0:
+        raise HTTPException(422, "an override to PARTIALLY_COVERED needs final_payable above 0.00")
     return AdjusterDecisionRecord(
         adjuster=redact_ics(body.adjuster),
         action=body.action,

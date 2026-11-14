@@ -387,7 +387,7 @@ class OpenAICompatibleProvider:
                 ],
             }
         ).encode()
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", "User-Agent": "tabarru-claims/0.1"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         request = urllib.request.Request(self.url, data=body, headers=headers, method="POST")

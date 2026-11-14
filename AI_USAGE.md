@@ -210,3 +210,88 @@ Review findings not acted on, and why:
   schema change; listed as a limitation.
 * **sklearn imported in llm mode.** The model file is still loaded lazily; the
   import cost is accepted.
+
+## Stretch goals and Task 2 follow-up fixes
+
+Tools: Claude Code (Opus 5.5) in VS Code, writing code, tests, docs and
+commits; one independent reviewer subagent (code-reviewer type) that read the
+diff and reported findings without editing; headless Chrome driven over the
+DevTools protocol by a throwaway Node script for the browser checks and
+screenshots; Docker Desktop for the container check.
+
+Skills used, and how:
+
+* **taste-skill**: read in full before building the view. Its own scope says
+  it is for landing pages and "not for dashboards or app screens", so its
+  direction draw, imagery floor and motion floor were not applied. Its house
+  rules were (no gradients, no shadows at rest except the dialog, no eyebrow
+  labels, no monospace outside ids and code, tone steps instead of lines,
+  words on every coloured badge), and its `lint.mjs` was run on `claims/web/`
+  (0 FAIL, 0 WARN; the dialog shadow carries its ignore comment).
+* **requesting-code-review / receiving-code-review**: the reviewer subagent;
+  each finding was checked against the code before acting (below).
+* **verification-before-completion**: every claim in the README stretch
+  section was re-run (pytest twice, ruff, taste lint, browser drive, Docker).
+* Not formally run this round: unlazy, modern-python, test-driven-development.
+  Tests were mostly written right after each piece of code, not before it.
+
+Key prompts: the stretch brief (adjuster view with taste-skill, `/metrics`,
+Docker, real-model comparison, plus three reproduced Task 2 issues), then
+"let the user select Groq or a local Ollama model from the models available"
+and "go with whichever is more accurate in Ollama, don't go with Groq".
+
+Mistakes found and how:
+
+* **A literal "null" under the source clause.** `replaceChildren(..., null)`
+  turns `null` into text. Seen in the first desktop screenshot; fixed by not
+  passing `null`.
+* **Audit events shown as raw ids, and REFER showing "MYR 0.00" as if
+  assessed.** Seen in screenshots; added readable labels and a "Not assessed:
+  referred" note.
+* **Wrong fault-injection API in a new metrics test** (assumed per-document
+  keys; the FakeProvider takes call numbers). The test failed; fixed the test.
+* **The innerHTML guard test matched a code comment.** Changed it to look for
+  real property use.
+* **Demo seeding used FastAPI's TestClient**, which needs `httpx`, a dev-only
+  dependency, so it would fail in the production image. Noticed while writing
+  the Dockerfile; seeding now calls the pipeline and store directly.
+* **Groq listing failed with HTTPError** because the default urllib
+  User-Agent is refused; a generic `tabarru-claims/0.1` User-Agent fixed it,
+  and errors now include the HTTP status.
+
+Independent review findings acted on:
+
+* IC redaction still missed underscore, slash, en dash, padded separators,
+  4-4-4 grouping and a letter directly before the digits (so an id like
+  `CLM900101145678` passed). Pattern widened; all forms are in a parametrised
+  test; the generated data was rescanned and only IC-shaped strings match.
+* The audit list could stay on "Loading..." after a dropped connection
+  (double render). Restructured the network-failure path.
+* Approve did not send the values the confirmation showed. It now sends
+  decision and payable; a test shows a stale payable gets 422.
+* The image pinned uv 0.5.11 while `uv.lock` is revision 5 from uv 0.13.1.
+  Pinned 0.13.1 and built the image.
+* Zero payable on an override was allowed but undocumented. Policy now:
+  approving a stored 0.00 PARTIALLY_COVERED is allowed, an override to
+  PARTIALLY_COVERED needs more than 0.00. Documented and tested.
+* Smaller: a late response could switch the view back to the old claim; the
+  submit label reset wrongly after 422; the whole claim was announced by a
+  live region; focus was lost after a decision. All fixed.
+
+Not acted on: none of the findings was rejected. The retry counter including a
+rare concurrent duplicate is documented rather than changed.
+
+Not verified:
+
+* The dropped-connection path was not exercised in the browser, only reviewed.
+* No screen reader was used; accessibility was checked by markup and keyboard
+  structure only.
+* Groq was not run (by choice); multi-worker metrics behaviour was not tested.
+* Rows written before the IC pattern change in an existing database are not
+  re-redacted.
+
+Real-model runs: a 4-claim pilot of llama3.1 (accuracy 0.5 vs 1.0 for fake on
+the same claims). A gemma-4-12b pilot was stopped unfinished when the model
+choice changed; qwen models were excluded at the user's request; a Groq
+gpt-oss-120b run was started and stopped before finishing, so no Groq numbers
+exist. A 10-claim gemma-4-12b run is in progress.

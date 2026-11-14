@@ -250,3 +250,23 @@ class QueueItem(BaseModel):
     claim_id: str
     product: Product | None
     recommendation: Recommendation
+
+
+class ClauseSource(BaseModel):
+    """One clause of the current certificate wording file, for the adjuster view."""
+
+    product: Product
+    clause_id: str
+    text: str
+    wording: Literal["current"] = "current"  # not a versioned snapshot of the wording
+
+
+class AuditEvent(BaseModel):
+    id: int
+    timestamp: str
+    actor: str
+    event: str
+    decision: str
+    payable: Money
+    clause_ids: list[str]
+    reason: str | None

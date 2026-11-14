@@ -182,3 +182,38 @@ def test_access_log_filter_masks_ic_in_path(dataset, tmp_path):
         f.filter(record)
     assert SYNTHETIC_IC not in record.getMessage()
     assert "XXXXXX-XX-1234" in record.getMessage()
+
+
+@pytest.mark.parametrize(
+    "ic",
+    [
+        "850101.14.5678",
+        "850101.145678",
+        "850101-14.5678",
+        "850101_14_5678",
+        "X850101145678",
+        "8501 0114 5678",
+        "850101 - 14 - 5678",
+        "850101/14/5678",
+        "850101\u201314\u20135678",
+    ],
+)
+def test_dotted_ic_forms_are_redacted(ic):
+    from claims.normalize import contains_ic, redact_ics
+
+    text = f"Rationale mentions participant {ic} in passing."
+    assert contains_ic(text)
+    out = redact_ics(text)
+    assert "XXXXXX-XX-5678" in out and "850101" not in out and "8501" not in out
+
+
+def test_ic_shaped_claim_id_and_adjuster_are_rejected_or_masked(tmp_path, dataset):
+    from fastapi.testclient import TestClient
+
+    from claims.api import create_app
+    from claims.providers import FakeProvider
+
+    client = TestClient(create_app(tmp_path / "p.db", dataset / "policies.jsonl", FakeProvider()))
+    body = {"claim_id": "CLM850101145678", "documents": [{"doc_id": "d1", "text": "SPECIMEN"}]}
+    response = client.post("/v1/claims", json=body)
+    assert response.status_code == 422 and "850101" not in response.text
