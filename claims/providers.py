@@ -11,13 +11,22 @@ import json
 import os
 import re
 import urllib.request
+from datetime import date
 from typing import Literal, Protocol
 
 from claims.normalize import fix_ocr_digits, fix_ocr_identifier, parse_amount, parse_date
 from claims.schemas import EXTRACTION_SCHEMAS, DocType
 
 Task = Literal["classify_document", "extract_fields"]
-Fault = Literal["malformed_json", "missing_field"]
+Fault = Literal[
+    "malformed_json",
+    "missing_field",
+    # coverage faults, used by guardrail tests
+    "wrong_quote",
+    "unretrieved_clause",
+    "drop_citations",
+    "provider_error",
+]
 
 _DOC_START, _DOC_END = "<<<DOCUMENT", "DOCUMENT>>>"
 
@@ -60,6 +69,27 @@ def build_prompt(
     if previous_error:
         lines.append(f"Your previous answer was rejected: {previous_error}. Return corrected JSON.")
     lines += [_DOC_START, text, _DOC_END]
+    return "\n".join(lines)
+
+
+COVERAGE_TASK = "assess_coverage"
+_EVIDENCE_START, _EVIDENCE_END = "<<<EVIDENCE", "EVIDENCE>>>"
+
+
+def build_coverage_prompt(facts: dict, clauses: list[dict], previous_error: str | None) -> str:
+    """Prompt for the coverage decision. Evidence is one JSON object between markers."""
+    lines = [
+        f"TASK: {COVERAGE_TASK}",
+        "Decide whether this Takaful claim is covered, using only the certificate clauses given.",
+        'Reply with JSON only: {"decision": "COVERED|PARTIALLY_COVERED|NOT_COVERED|REFER", '
+        '"cited_clauses": [{"clause_id": "...", "quote": "..."}], "rationale": "..."}.',
+        "Each quote must be copied word for word from the cited clause. NOT_COVERED and "
+        "PARTIALLY_COVERED must cite at least one clause. Do not state a payable amount.",
+    ]
+    if previous_error:
+        lines.append(f"Your previous answer was rejected: {previous_error}. Return corrected JSON.")
+    evidence = json.dumps({"claim": facts, "clauses": clauses}, sort_keys=True)
+    lines += [_EVIDENCE_START, evidence, _EVIDENCE_END]
     return "\n".join(lines)
 
 
@@ -191,6 +221,8 @@ class FakeProvider:
         start = prompt.find(_DOC_START)
         end = prompt.rfind(_DOC_END)
         text = prompt[start + len(_DOC_START) : end] if 0 <= start < end else ""
+        if task and task.group(1) == COVERAGE_TASK:
+            return self._coverage_answer(prompt)
         if task and task.group(1) == "classify_document":
             answer = self._classify(text)
         else:
@@ -202,6 +234,27 @@ class FakeProvider:
             return '{"doc_type": "claim_form", oops'
         if fault == "missing_field" and answer:
             answer.pop(next(iter(answer)))
+        return json.dumps(answer)
+
+    def _coverage_answer(self, prompt: str) -> str:
+        start = prompt.find(_EVIDENCE_START)
+        end = prompt.rfind(_EVIDENCE_END)
+        evidence = json.loads(prompt[start + len(_EVIDENCE_START) : end])
+        answer = assess_coverage(evidence["claim"], evidence["clauses"])
+        fault = self.faults.get(self.calls)
+        if fault == "provider_error":
+            raise ProviderError("fake provider failure (injected)")
+        if fault == "malformed_json":
+            return '{"decision": "COVERED", oops'
+        if fault == "missing_field":
+            answer.pop("decision")
+        cited = answer.get("cited_clauses", [])
+        if fault == "wrong_quote" and cited:
+            cited[0]["quote"] = cited[0]["quote"].rstrip(".") + " in all cases."
+        if fault == "unretrieved_clause" and cited:
+            cited[0]["clause_id"] = "MED-99.9"
+        if fault == "drop_citations":
+            answer["cited_clauses"] = []
         return json.dumps(answer)
 
     @staticmethod
@@ -225,6 +278,84 @@ class FakeProvider:
                     result[key] = _convert(kind, match.group(1))
                     break
         return result
+
+
+def _quote(clause: dict) -> str:
+    """The rule sentence of a clause: the sentence after its title, word for word."""
+    sentences = re.split(r"(?<=\.) ", clause["text"])
+    return sentences[1] if len(sentences) > 1 else sentences[0]
+
+
+def assess_coverage(claim: dict, clauses: list[dict]) -> dict:
+    """Deterministic rule reading of the supplied facts and retrieved clauses.
+
+    Each rule needs its clause among the retrieved evidence; when the deciding
+    clause was not retrieved the fake answers REFER rather than cite from memory.
+    Thresholds (waiting days, room limit) are read from the clause text.
+    """
+
+    def find(phrase: str) -> dict | None:
+        # Match the clause title (text before the first full stop), not the body:
+        # "own damage" also appears in the body of the collision excess clause.
+        return next((c for c in clauses if phrase in c["text"].split(".")[0].lower()), None)
+
+    def answer(decision: str, clause: dict | None, why: str) -> dict:
+        if clause is None and decision != "COVERED":
+            return {
+                "decision": "REFER",
+                "cited_clauses": [],
+                "rationale": why + "; deciding clause not retrieved",
+            }
+        cited = [{"clause_id": clause["clause_id"], "quote": _quote(clause)}] if clause else []
+        return {"decision": decision, "cited_clauses": cited, "rationale": why}
+
+    product = claim.get("product")
+    incident, start, end = (claim.get(k) for k in ("incident_date", "cert_start", "cert_end"))
+    if incident and start and end and not (start <= incident <= end):
+        return answer(
+            "NOT_COVERED",
+            find("period of cover"),
+            "incident date is outside the certificate period",
+        )
+    text = " ".join(claim.get(k) or "" for k in ("diagnosis", "cause_of_loss")).lower()
+    if product == "MEDICAL":
+        if "cosmetic" in text:
+            return answer(
+                "NOT_COVERED", find("cosmetic treatment exclusion"), "treatment is cosmetic"
+            )
+        waiting = find("waiting period for illness")
+        days = re.search(r"waiting period of (\d+) days", waiting["text"]) if waiting else None
+        if days and incident and start and "accident" not in text:
+            gap = (date.fromisoformat(incident) - date.fromisoformat(start)).days
+            if gap < int(days.group(1)):
+                return answer("NOT_COVERED", waiting, "illness began inside the waiting period")
+        room = find("room and board sub-limit")
+        limit = re.search(r"RM ([0-9.]+) per day", room["text"]) if room else None
+        rate = claim.get("room_rate_per_day")
+        if limit and rate and float(rate) > float(limit.group(1)):
+            return answer(
+                "PARTIALLY_COVERED", room, "room rate is above the daily room and board limit"
+            )
+        return answer(
+            "COVERED",
+            find("hospitalisation benefit"),
+            "medically necessary admission inside the period",
+        )
+    if product == "MOTOR":
+        if "racing" in text:
+            return answer("NOT_COVERED", find("racing exclusion"), "vehicle was used for racing")
+        if "unlicensed" in text:
+            return answer(
+                "NOT_COVERED", find("unlicensed driver exclusion"), "driver was unlicensed"
+            )
+        if re.search(r"\b(collision|collided|impact|hit)\b", text):
+            return answer(
+                "PARTIALLY_COVERED",
+                find("collision excess"),
+                "collision damage, the excess applies",
+            )
+        return answer("COVERED", find("own damage"), "accidental own damage inside the period")
+    return {"decision": "REFER", "cited_clauses": [], "rationale": "product unknown"}
 
 
 # ---- Optional real provider

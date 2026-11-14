@@ -1,4 +1,4 @@
-# Project Tabarru: claim packet intake agent
+# Project Tabarru: claim intake and cited coverage recommendation
 
 A Python package, `claims`, that takes a packet of OCR'd claim documents for a
 synthetic Malaysian Takaful operator (motor and medical), classifies each
@@ -6,9 +6,10 @@ document, extracts the claim fields through an `LLMProvider`, validates them
 against a typed schema, the certificate register and cross-document rules, and
 stores the claim with a step-by-step trace. It has a CLI and a FastAPI API.
 
-Status: **Task 1 is implemented and tested. Tasks 2 and 3 are not started**
-(no coverage step, clause retrieval, adjuster gate, evaluation report or
-trained classifier yet). See "What is next".
+Status: **Tasks 1 and 2 are implemented and tested. Task 3 is not started**
+(no trained classifier yet). Task 2 adds clause retrieval, a cited coverage
+recommendation, payable calculation in code, an adjuster gate with an
+append-only audit table, and an evaluation command. See "Task 2" below.
 
 All data is synthetic and produced by `claims/generate.py`. Every document
 contains the word SPECIMEN. Names, IC numbers (place code `00`, which is not
@@ -40,7 +41,10 @@ uv run python -m claims.intake data/claims/CLM-0002/ --trace --db data/claims.db
 # 3. Serve the API (reads CLAIMS_DB and CLAIMS_REGISTER, defaults under data/)
 uv run uvicorn --factory claims.api:create_app --port 8000
 
-# 4. Tests and checks
+# 4. Score coverage on all 40 claims (offline, about 0.1 s)
+uv run python -m claims.eval --provider fake --out reports/
+
+# 5. Tests and checks
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
 ```
@@ -62,7 +66,9 @@ Five document types with two layouts each (for example "CLAIM FORM" with
 a list or as a `|` table; a discharge summary as fields or as prose). Every
 document picks its date format (`03/04/2026`, `3-Apr-2026`, `2026-04-03`,
 `3 April 2026`) and amount format (`RM 1,250.00`, `1250`, `MYR 1,250.00`) at
-random. About 40% of documents (55 of 124 for seed 7) also get OCR noise: an
+random. Exactly ceil(40%) of documents (50 of 124 for seed 7) also get OCR
+noise, picked with a seeded sample so even a two-claim run meets the 25%
+minimum: an
 O/0 or I/1 swap inside numeric values, an extra scan header and footer, and,
 for half of those, shuffled lines.
 
@@ -81,7 +87,9 @@ deletes both from reach and gets the same result).
 * `claim_id` is the folder name, `doc_id` is each file's stem. File names are
   never used to guess document type.
 * Exit 0 on success, 1 if the folder has no `.txt` files, the register is
-  missing, or a file name is not a valid id. With `--db`, a claim already stored
+  missing, or the folder name, a file name or a file's text fails the same
+  `ClaimRequest` validation as `POST /v1/claims` (so the CLI and API accept
+  the same packets and print the same JSON, which a test asserts). With `--db`, a claim already stored
   exits 2 and nothing is overwritten.
 * `--trace` adds the trace (same shape as `GET /v1/claims/{id}`).
 
@@ -108,9 +116,9 @@ returns 201 and
 
 | Case | Response |
 | --- | --- |
-| Unknown claim_id on GET | 404 |
+| Unknown claim_id on GET | 404 `claim not found` (the id is not echoed) |
 | claim_id already stored | 409, the stored claim is unchanged |
-| Invalid body (missing keys, extra keys, 0 or more than 10 documents, duplicate doc_id, ids outside `[A-Za-z0-9_.-]`, empty or >100k char text) | 422 with `loc`, `type`, `msg` only. The default FastAPI 422 echoes the input, which could contain an IC, so it is replaced. |
+| Invalid body (missing keys, extra keys, 0 or more than 10 documents, duplicate doc_id, ids outside `[A-Za-z0-9_.-]` or containing an IC-shaped number, empty or >100k char text) | 422 with `loc`, `type`, `msg` only. The default FastAPI 422 echoes the input, which could contain an IC, so it is replaced. String parts of `loc` and `msg` go through IC redaction, because an unexpected key name is user input. |
 | Model output is bad | Never an error: the document is marked failed and the claim flagged |
 
 Amounts are serialised as strings with two decimals (`"1250.00"`) so no float
@@ -258,9 +266,24 @@ patterns. A real model on unseen layouts would not score like this.
   response or the database through the claim record.
 * Stored document text has every IC-shaped number redacted (including OCR
   variants like `9OO1O1-00-I234`).
-* Trace errors are built without input values and then also redacted.
-* Logs contain claim id, status, reason codes and failed doc ids only.
-* The custom 422 handler drops `input`.
+* Every other text field (participant_name, diagnosis, cause_of_loss and so
+  on) is passed through the same redaction in `assemble_claim`, in case a
+  model copies an IC into it.
+* Retry feedback and trace errors are built from error locations and types
+  only, and the locations are redacted before they enter the prompt, because a
+  model can invent a key such as `"900101-00-1234"`.
+* `claim_id` and `doc_id` are rejected (422 in the API, exit 1 in the CLI) if
+  they contain an IC-shaped number, since ids are echoed in responses, the
+  trace and logs. This is a deliberate rejection; ordinary ids such as
+  `CLM-0001` or `42c927b9` are unaffected. 404 and 409 messages do not echo the
+  id.
+* Logs contain claim id, status, reason codes and failed doc ids only. The app
+  adds a filter to the `uvicorn.access` logger that masks IC-shaped text in the
+  request path.
+* The custom 422 handler drops `input` and redacts `loc` and `msg`.
+
+All of this uses one function, `normalize.redact_ics`, so there is a single
+definition of what an IC looks like.
 
 Tests check the response bodies, trace, logs and raw SQLite bytes for the full
 IC on both a successful path and a misbehaving provider that echoes the IC
@@ -286,7 +309,7 @@ this round, so its accuracy is unmeasured.
 
 ## Tests
 
-`uv run pytest` runs 74 tests in under a second. An autouse fixture removes
+`uv run pytest` runs 91 tests in under a second. An autouse fixture removes
 every `CLAIMS_*` variable and patches `socket` so any network connection
 raises; the real adapter test relies on that to prove it fails cleanly.
 Each test that touches SQLite uses its own `tmp_path` database, and the
@@ -302,16 +325,265 @@ dataset is generated once per session into a temp folder.
 | Each reason code | `test_reason_code_scenarios_are_flagged[...]` (generated packets) and hand-built rule tests, including the 1% boundary |
 | All documents failing | `test_all_documents_failing_gives_failed_claim` |
 | POST then GET, shape, four trace steps, masked IC | `test_api.py::test_post_then_get` |
-| No full IC in logs, trace, errors, DB | `test_privacy.py` |
+| No full IC in logs, trace, errors, DB | `test_privacy.py` (including an IC as an unexpected JSON key, IC-shaped ids, an IC in free-text model fields, retry feedback and the access log) |
+| At least 25% OCR noise, even for small runs | `test_generate.py::test_noise_share_is_guaranteed_for_small_runs` |
+| CLI prints the same JSON as the API | `test_cli_and_providers.py::test_cli_output_equals_api_post_response` |
 | Provider ignores labels, generator and file names | `test_fake_works_without_labels_or_generator`, `test_fake_ignores_file_names_and_packet_order` |
 
 No test needs a marker: nothing uses live services.
 
+## Task 2: cited coverage recommendation, adjuster gate and evaluation
+
+### Flow
+
+```
+POST /v1/claims
+  run_intake   classify_documents -> extract_fields -> validate -> assemble_claim   (Task 1, unchanged)
+  run_coverage coverage   (retrieve clauses -> provider decision + citation guard -> payable in code)
+  store        claim, documents, trace, recommendation, audit row (one transaction)
+  status       pending_adjuster (always)
+POST /v1/claims/{id}/adjuster-decision
+  status       decided, adjuster decision stored next to the untouched recommendation, audit row
+```
+
+Code: `claims/retrieval.py` (BM25), `claims/coverage.py` (step, guardrails,
+payable), `claims/providers.py` (`build_coverage_prompt`, `assess_coverage`
+for the fake), `claims/storage.py` (audit, migration, `decide`),
+`claims/api.py` (endpoints), `claims/eval.py` (metrics). The generator writes
+the wording from `claims/wording.py`; the runtime only reads the generated
+files under `data/`.
+
+### Generated certificates, schedules and labels
+
+`python -m claims.generate --claims 40 --seed 7 --out data/` now also writes:
+
+* `data/certificates/MEDICAL.md` (14 clauses, `MED-1.1` to `MED-6.2`) and
+  `data/certificates/MOTOR.md` (13 clauses, `MTR-1.1` to `MTR-6.1`). One clause
+  per line: `<ID> <Title>. <rule sentence>...`. Each file says SPECIMEN.
+* `data/schedules/MEDICAL.json`: `room_board_per_day` 250.00,
+  `annual_limit` 100000.00, `waiting_period_days` 30.
+  `data/schedules/MOTOR.json`: `excess` 500.00. The certificate limit
+  (`sum_covered`) is per certificate in `policies.jsonl`. A test checks that
+  every schedule value appears in the wording.
+* `labels.jsonl` gains `coverage_scenario`, `expected_decision`,
+  `expected_clause_ids` and `expected_payable`. These are computed in
+  `expected_coverage()` in the generator from its own facts, not by calling
+  `claims.coverage`.
+
+The six "clean" slots of each ten-claim cycle become: covered (2), partial
+(sub-limit for medical, collision excess for motor), incident outside the
+certificate period, illness inside the 30-day waiting period (always
+medical), excluded cause (cosmetic treatment; racing or unlicensed driver).
+The four anomaly slots keep their Task 1 reason codes and expect REFER. Per 40
+claims: covered 8, partial 4, outside period 4, waiting period 4, excluded 4,
+missing document 4 (plus 12 other REFER). Task 1 scenarios, OCR noise, opaque
+file names and byte-identical output per seed are unchanged.
+
+### Retrieval
+
+`ClauseIndex.retrieve(query, product, k)` returns `Clause(clause_id, text,
+score)`. Only the claim's product's clauses are scored, so a motor query can
+never return a medical clause. BM25 with k1 = 1.5, b = 0.75, lowercase
+alphanumeric tokens, a short stopword list, no stemming, `k = 6`. Ties sort by
+clause id.
+
+Query (`build_query`), built from extracted fields only:
+
+1. fixed product terms: MEDICAL `period of cover start date hospitalisation
+   benefit room and board per day`; MOTOR `period of cover start date own
+   damage repair excess`;
+2. the extracted `diagnosis` and `cause_of_loss` text;
+3. `waiting period illness` when the product is MEDICAL and the extracted
+   incident date is less than 60 days after the register's certificate start.
+
+Labels, scenarios, file names and claim ids are never used.
+
+### Coverage step and guardrails
+
+The provider gets the claim fields (without the IC), the certificate start and
+end dates from the register, and the top-k clauses, as one JSON block in the
+prompt. It must return `{"decision", "cited_clauses": [{"clause_id",
+"quote"}], "rationale"}`; extra keys (for example a `payable_amount`) are a
+schema error.
+
+Checked in code (`check_citations`):
+
+* every `clause_id` is one of the retrieved clauses;
+* every quote is a non-empty exact substring of that clause's text, and holds
+  no IC number;
+* NOT_COVERED and PARTIALLY_COVERED cite at least one clause.
+
+A broken rule is retried once. The retry prompt names the rule and the
+citation number only (for example `citation 1: quote is not an exact
+substring of its clause`), never the model's text. If the second answer also
+fails: REFER with `CITATION_INVALID`. Invalid JSON or schema twice gives REFER
+with `COVERAGE_OUTPUT_INVALID`; a provider exception twice gives REFER with
+`PROVIDER_ERROR`. A failing real provider is never replaced by the fake. Each
+attempt's error is kept in the `coverage` trace entry, which also lists the
+retrieved `clause_ids`.
+
+Bypass (REFER, no provider call, trace entry `coverage` with status
+`skipped` and `bypassed: <codes>`): intake failed (`INTAKE_FAILED`), or the
+claim carries any intake reason code. `CERT_NOT_FOUND` and `MISSING_DOCUMENT`
+are required by the assignment. I also bypass `DATE_ORDER_INVALID`,
+`AMOUNT_MISMATCH` and `FIELDS_INCOMPLETE`, because the dates and amounts the
+decision and payable depend on are in doubt; and a packet with a failed
+document (`INTAKE_INCOMPLETE`). The intake `status` is kept as
+`intake_status`, and the top-level `reason_codes` stay the intake codes; the
+recommendation's `reason_codes` are the intake codes plus any coverage code.
+
+FakeProvider coverage (`assess_coverage`) applies the wording's rules to the
+supplied facts, in this order: period of cover, exclusions (cosmetic;
+racing; unlicensed), waiting period (days read from the clause text, not for
+accident diagnoses), room sub-limit (limit read from the clause text) or
+collision excess, otherwise covered. It cites the clause whose title matches
+the rule, quoting the rule sentence word for word. If that clause was not
+retrieved it answers REFER rather than cite from memory. Faults for tests:
+`wrong_quote`, `unretrieved_clause`, `drop_citations`, `provider_error`,
+`malformed_json`, `missing_field`.
+
+### Payable (code only)
+
+`calculate_payable` uses `Decimal` throughout. It runs only for COVERED and
+PARTIALLY_COVERED; NOT_COVERED and REFER are always 0.00.
+
+```
+MEDICAL  days         = max(discharge_date - admission_date in days, 1)         (MED-4.3)
+         room_excess  = max(room_rate_per_day - room_board_per_day, 0) * days   (MED-4.1)
+         payable      = min(bill_total - room_excess, annual_limit, sum_covered, amount_claimed)
+MOTOR    excess       = 500.00 when cause_of_loss names a collision or impact
+                        (collision, collided, impact, hit as whole words), else 0 (MTR-5.1, MTR-5.2)
+         payable      = min(repair_total - excess, sum_covered, amount_claimed)
+then     payable      = max(payable, 0.00), rounded half up to cents
+```
+
+Deductions come first, caps second. Days count nights, so a same-day
+discharge is one day. If an input is missing (for example no room rate), the
+claim is REFER with `CALC_INPUT_MISSING`; nothing is guessed.
+
+Hand-checked tests (`tests/test_coverage.py`): 3 days at RM 400 with a
+RM 3,000.00 bill pays 3000.00 - 150 x 3 = **2550.00**; a RM 2,345.60 collision
+repair pays 2345.60 - 500.00 = **1845.60**; the flood case pays the full
+2345.60; theft, fire and "street" causes carry no excess while "hit a tree" does; boundaries at the annual limit and sum covered; a repair below the
+excess pays 0.00.
+
+### Workflow and adjuster endpoints
+
+Statuses: intake result in `intake_status` (`intake_complete`, `flagged`,
+`failed`); workflow `status` is `pending_adjuster` after POST, `decided` after
+the adjuster acts. Nothing is settled automatically, including REFER.
+
+```bash
+curl -s localhost:8000/v1/adjuster/queue
+curl -s -X POST localhost:8000/v1/claims/CLM-0002/adjuster-decision \
+  -H 'content-type: application/json' \
+  -d '{"adjuster": "adj.lim", "action": "approve"}'
+curl -s -X POST localhost:8000/v1/claims/CLM-0001/adjuster-decision \
+  -H 'content-type: application/json' \
+  -d '{"adjuster": "adj.lim", "action": "override", "final_decision": "PARTIALLY_COVERED",
+       "final_payable": "1200.00", "reason": "pharmacy item not medically necessary"}'
+```
+
+* `approve` may omit `final_decision` and `final_payable`; if sent they must
+  equal the recommendation, otherwise 422 (no silent override).
+* `override` needs a non-blank `reason`, `final_decision` and `final_payable`
+  (422 otherwise).
+* NOT_COVERED and REFER need `final_payable` 0.00; COVERED and
+  PARTIALLY_COVERED need more than 0.00.
+* Unknown claim 404; a claim that is not `pending_adjuster` (already decided,
+  or a Task 1 claim never assessed) 409.
+* `GET /v1/claims/{id}` returns `recommendation` (original, never changed)
+  and `adjuster_decision` separately.
+
+`ClaimStore.decide` runs `BEGIN IMMEDIATE`, then
+`UPDATE ... WHERE status = 'pending_adjuster'`, then the audit insert, then
+`COMMIT`. The conditional update means only one of two concurrent requests
+can match; a test runs 8 threads and gets exactly one success.
+
+### Audit
+
+Table `audit(id, timestamp, actor, claim_id, event, decision, payable,
+clause_ids, reason)`. One row per stored recommendation (actor
+`coverage-agent`, written in the same transaction as the claim) and one per
+successful adjuster decision (actor = adjuster). Triggers abort any UPDATE or
+DELETE on the table. Rejected requests (422, 404, 409) write nothing.
+
+A Task 1 database is migrated on open with `ALTER TABLE ... ADD COLUMN`
+(`intake_status`, `recommendation`, `adjuster_decision`, trace `clause_ids`)
+and the new `audit` table. Existing rows are untouched; old claims read back
+with `recommendation: null`. Duplicate `claim_id` still returns 409.
+
+### Privacy additions
+
+The provider never receives the IC. Rationale, adjuster `reason` and adjuster
+name pass through `redact_ics` (the name is rejected with 422 if it is an IC).
+A quote holding an IC fails the citation check instead of being edited, so a
+stored quote is always an exact substring. Provider errors are reported by
+type only, and the 422 handler from Task 1 covers the new endpoint. A test
+dumps the whole SQLite file after an override whose reason contains the IC
+and finds no full IC.
+
+### Evaluation
+
+`python -m claims.eval --provider fake --out reports/` runs `assess_claim`
+(intake plus coverage) on every claim in memory, with no database, and writes
+`reports/coverage_eval.json`. Labels are read only to score. Measured on seed
+7, 40 claims, k = 6 (two consecutive runs give the same file; about 0.1 s):
+
+| metric | value |
+|---|---|
+| decision_accuracy | 0.975 |
+| payable_exact_match | 1.0 |
+| retrieval_recall_at_k | 0.9583 |
+| citation_precision | 1.0 |
+| citation_recall | 0.9583 |
+| citation_invalid_rate | 0.0 |
+| attempted_citation_invalid_rate | 0.0 |
+
+| expected \ predicted | COV | PART | NOT | REF |
+|---|---|---|---|---|
+| COV | 8 | 0 | 0 | 0 |
+| PART | 0 | 4 | 0 | 0 |
+| NOT | 0 | 0 | 11 | 1 |
+| REF | 0 | 0 | 0 | 16 |
+
+Definitions:
+
+* `decision_accuracy`, `payable_exact_match`: over all 40 claims; payable
+  matches within MYR 0.01.
+* `retrieval_recall_at_k`: expected clause ids found in the top-k / all
+  expected clause ids, over the 24 claims that have expected clauses (REFER
+  claims expect none). A bypassed claim retrieves nothing, so its expected ids
+  count as missed.
+* `citation_precision`: final cited ids that are expected / all final cited
+  ids (null if nothing is cited). `citation_recall`: expected ids finally
+  cited / all expected ids.
+* `citation_invalid_rate`: claims whose final recommendation has
+  `CITATION_INVALID` / claims where the coverage provider was called (24;
+  bypassed claims are excluded). `attempted_citation_invalid_rate` also counts
+  claims fixed on the retry.
+
+Error sources seen:
+
+1. **Retrieval miss on short exclusion text (the only error).** CLM-0038,
+   diagnosis "Elective cosmetic liposuction", expected NOT_COVERED on MED-5.1.
+   The fixed base terms (period, hospitalisation, room and board) outscore
+   the single word "cosmetic", so MED-5.1 is not in the top 6. The fake then
+   answers REFER instead of citing an unretrieved clause. This one miss is the
+   whole gap in decision accuracy, retrieval recall and citation recall.
+2. Nothing else failed. That is a property of this synthetic data, not
+   evidence of quality: the same author wrote the wording, the generator and
+   the fake's rules, the diagnoses and causes come from short fixed lists, and
+   OCR noise does not touch the free-text fields the rules read. A real model
+   reading real wording would make quote, exclusion and partial-payment
+   mistakes that this set cannot show. `citation_invalid_rate` is 0 because
+   the fake copies sentences from the clause text; the guard itself is tested
+   with injected faults.
+
 ## What is next
 
-* Task 2: certificate wording generator, BM25 clause retrieval, coverage step
-  with citation guard, payable computed in code, adjuster queue and decision
-  endpoints with an append-only audit table, `claims.eval`.
+* Retrieval: weight claim-specific terms above the fixed base terms (the one
+  measured miss), or retrieve once per question (period, exclusion, limit).
 * Task 3: trained TF-IDF + logistic regression classifier with held-out
   layouts, `CLAIMS_CLASSIFIER=trained|llm|hybrid` selecting the
   `classify_documents` implementation (the step already isolates

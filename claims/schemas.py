@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
 
-from claims.normalize import to_money
+from claims.normalize import contains_ic, to_money
 
 
 class DocType(str, Enum):
@@ -122,7 +122,9 @@ class ClaimFields(BaseModel):
         return value
 
 
-ClaimStatus = Literal["intake_complete", "flagged", "failed"]
+IntakeStatus = Literal["intake_complete", "flagged", "failed"]
+# Task 2 workflow: every assessed claim waits for an adjuster, then is decided.
+ClaimStatus = Literal["intake_complete", "flagged", "failed", "pending_adjuster", "decided"]
 DocStatus = Literal["processed", "failed"]
 StepStatus = Literal["ok", "partial", "failed", "skipped"]
 
@@ -134,20 +136,62 @@ class TraceEntry(BaseModel):
     duration_ms: float
     provider_calls: int
     error: str | None = None
+    clause_ids: list[str] = []  # retrieved clauses, coverage step only
+
+
+# ---- Coverage
+
+
+class Decision(str, Enum):
+    COVERED = "COVERED"
+    PARTIALLY_COVERED = "PARTIALLY_COVERED"
+    NOT_COVERED = "NOT_COVERED"
+    REFER = "REFER"
+
+
+class CitedClause(_Strict):
+    clause_id: str = Field(min_length=1, max_length=32)
+    quote: str = Field(min_length=1, max_length=2000)
+
+
+class CoverageOutput(_Strict):
+    """What the provider must return for the assess_coverage task."""
+
+    decision: Decision
+    cited_clauses: list[CitedClause] = Field(max_length=10)
+    rationale: str = Field(max_length=4000)
+
+
+class Recommendation(BaseModel):
+    decision: Decision
+    cited_clauses: list[CitedClause]
+    rationale: str
+    payable_amount: Money
+    reason_codes: list[str]
 
 
 # ---- API contract
 
-_ID = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+
+def _not_ic(value: str) -> str:
+    # Ids are echoed in responses, the trace and logs, so they must not carry an IC.
+    if contains_ic(value):
+        raise ValueError("id must not contain an IC number")
+    return value
+
+
+Identifier = Annotated[
+    str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"), AfterValidator(_not_ic)
+]
 
 
 class InputDocument(_Strict):
-    doc_id: str = Field(pattern=_ID)
+    doc_id: Identifier
     text: str = Field(min_length=1, max_length=100_000)
 
 
 class ClaimRequest(_Strict):
-    claim_id: str = Field(pattern=_ID)
+    claim_id: Identifier
     documents: list[InputDocument] = Field(min_length=1, max_length=10)
 
     @field_validator("documents")
@@ -169,8 +213,40 @@ class ClaimResponse(BaseModel):
     status: ClaimStatus
     documents: list[DocumentResult]
     fields: ClaimFields
-    reason_codes: list[str]
+    reason_codes: list[str]  # intake reason codes, unchanged by coverage
+    intake_status: IntakeStatus | None = None
+    recommendation: Recommendation | None = None
+
+
+class AdjusterDecisionRecord(BaseModel):
+    adjuster: str
+    action: Literal["approve", "override"]
+    final_decision: Decision
+    final_payable: Money
+    reason: str | None
 
 
 class ClaimDetail(ClaimResponse):
     trace: list[TraceEntry]
+    adjuster_decision: AdjusterDecisionRecord | None = None
+
+
+class AdjusterDecisionRequest(_Strict):
+    adjuster: Annotated[str, Field(min_length=1, max_length=64), AfterValidator(_not_ic)]
+    action: Literal["approve", "override"]
+    final_decision: Decision | None = None
+    final_payable: Money | None = None
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("adjuster")
+    @classmethod
+    def _adjuster_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("adjuster must not be blank")
+        return value.strip()
+
+
+class QueueItem(BaseModel):
+    claim_id: str
+    product: Product | None
+    recommendation: Recommendation
