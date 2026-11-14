@@ -280,6 +280,21 @@ def test_motor_excess():
     assert calculate_payable(flood, MOTOR_SCHEDULE, Decimal("30000")) == Decimal("2345.60")
 
 
+@pytest.mark.parametrize(
+    "cause,payable",
+    [
+        ("collision with car on the street", "2500.00"),  # "street" must not waive it
+        ("car hit a tree", "2500.00"),  # impact, so MTR-5.1 applies
+        ("vehicle stolen from car park", "3000.00"),
+        ("fire in engine bay", "3000.00"),
+        ("fallen tree branch on the roof", "3000.00"),
+    ],
+)
+def test_motor_excess_applies_only_to_collision_or_impact(cause, payable):
+    fields = motor("3000.00", cause)
+    assert calculate_payable(fields, MOTOR_SCHEDULE, Decimal("30000")) == Decimal(payable)
+
+
 def test_motor_never_negative_and_capped_by_sum_covered():
     assert calculate_payable(
         motor("300.00", "hit a pole"), MOTOR_SCHEDULE, Decimal("30000")

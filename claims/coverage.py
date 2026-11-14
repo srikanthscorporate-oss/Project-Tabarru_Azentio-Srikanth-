@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
@@ -48,7 +49,9 @@ CENT = Decimal("0.01")
 ZERO = Decimal("0.00")
 # Intake codes that send a claim straight to REFER without a provider call.
 BYPASS_CODES = ("CERT_NOT_FOUND", "MISSING_DOCUMENT")
-SPECIAL_PERILS = ("flood", "tree")  # MTR-5.2: no excess when damage is only from these
+# MTR-5.1: the excess applies to own damage caused by a collision or impact.
+# Other causes (flood, falling tree, theft, fire) carry no excess (MTR-5.2).
+COLLISION = re.compile(r"\b(collision|collided|impact|hit)\b", re.I)
 
 
 @dataclass
@@ -100,7 +103,7 @@ def calculate_payable(
     MEDICAL: days = max(discharge - admission in days, 1) (MED-4.3)
              room_excess = max(room_rate - room_limit, 0) * days (MED-4.1)
              payable = min(bill_total - room_excess, annual_limit, sum_covered, amount_claimed)
-    MOTOR:   excess = schedule excess unless the cause is only flood or a falling tree
+    MOTOR:   excess = schedule excess when the cause is a collision or impact, else 0
              payable = min(repair_total - excess, sum_covered, amount_claimed)
     Deductions come first, then the caps; the result is floored at 0.00 and
     rounded half up to cents.
@@ -120,9 +123,8 @@ def calculate_payable(
     elif fields.product is not None and fields.product.value == "MOTOR":
         if fields.repair_total is None or fields.cause_of_loss is None:
             return None
-        cause = fields.cause_of_loss.lower()
-        special = any(word in cause for word in SPECIAL_PERILS)
-        gross = fields.repair_total - (ZERO if special else Decimal(schedule["excess"]))
+        excess = Decimal(schedule["excess"]) if COLLISION.search(fields.cause_of_loss) else ZERO
+        gross = fields.repair_total - excess
     else:
         return None
     return _money(min([gross, *caps]))

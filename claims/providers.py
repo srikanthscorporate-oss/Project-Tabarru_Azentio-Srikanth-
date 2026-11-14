@@ -348,7 +348,7 @@ def assess_coverage(claim: dict, clauses: list[dict]) -> dict:
             return answer(
                 "NOT_COVERED", find("unlicensed driver exclusion"), "driver was unlicensed"
             )
-        if any(w in text for w in ("collision", "hit ", "impact")):
+        if re.search(r"\b(collision|collided|impact|hit)\b", text):
             return answer(
                 "PARTIALLY_COVERED",
                 find("collision excess"),
