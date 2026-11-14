@@ -29,6 +29,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from claims import metrics
 from claims.classifier import ClassifierConfig
 from claims.normalize import contains_ic, redact_ics
 from claims.pipeline import _Step, describe_error, run_intake
@@ -162,8 +163,10 @@ def _assess(
     facts = _facts(fields, cert)
 
     error, kind, output = None, None, None
-    for _ in range(MAX_ATTEMPTS):
+    for attempt in range(MAX_ATTEMPTS):
         step.calls += 1
+        if attempt:
+            metrics.record_retry(step.name)
         try:
             raw = provider.complete(build_coverage_prompt(facts, evidence, error))
             candidate = CoverageOutput.model_validate(json.loads(raw))

@@ -283,6 +283,11 @@ class ClaimStore:
         finally:
             conn.close()
 
+    def status_counts(self) -> dict[str, int]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute("SELECT status, COUNT(*) AS n FROM claims GROUP BY status")
+            return {r["status"]: r["n"] for r in rows.fetchall()}
+
     def audit(self, claim_id: str | None = None) -> list[dict]:
         query, args = "SELECT * FROM audit", ()
         if claim_id is not None:
