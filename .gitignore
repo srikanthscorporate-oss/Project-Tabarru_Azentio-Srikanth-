@@ -1,0 +1,39 @@
+# Markdown: only README.md is tracked
+*.md
+!README.md
+!AI_USAGE.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment and secrets
+.env
+!.env.example
+.env.local
+
+# Local databases
+*.db
+*.sqlite3
+
+# OS and editors
+.DS_Store
+.vscode/
+.idea/
+
+
+
+# Generated data and local working files
+data/
+reports/
+.ruff_cache/
+.unlazy/
+artifacts/
