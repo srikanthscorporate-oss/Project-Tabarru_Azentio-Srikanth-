@@ -2,7 +2,7 @@
 
     CLAIMS_CLASSIFIER=llm|trained|hybrid   (default llm)
     CLAIMS_CLASSIFIER_MODEL=models/doc_classifier.joblib
-    CLAIMS_HYBRID_THRESHOLD=0.80            (optional; default from the model metadata)
+    CLAIMS_HYBRID_THRESHOLD=0.40            (optional; default is the threshold stored in the model)
 
 llm keeps the provider path in claims.pipeline. trained never calls the provider
 for classification. hybrid uses the trained prediction when its top probability
@@ -31,9 +31,6 @@ Mode = Literal["llm", "trained", "hybrid"]
 MODES: tuple[str, ...] = ("llm", "trained", "hybrid")
 DEFAULT_MODEL_PATH = Path("models/doc_classifier.joblib")
 
-# Fixed before looking at any test result. With five classes a uniform guess is
-# 0.20; 0.80 asks for a clear winner and sends anything less certain to the LLM.
-DEFAULT_THRESHOLD = 0.80
 
 MODEL_SETTINGS = {
     "tfidf": {
@@ -89,6 +86,7 @@ class TrainedModel:
             valid = {t.value for t in DocType}
             if not set(model.pipeline.classes_) <= valid:
                 raise ValueError("unknown class labels")
+            float(model.metadata["threshold"])
         except Exception as exc:
             raise ClassifierConfigError(
                 f"classifier model at {path} is not a valid artifact ({type(exc).__name__}); "
@@ -103,7 +101,7 @@ class ClassifierConfig:
 
     mode: Mode = "llm"
     model: TrainedModel | None = None
-    threshold: float = DEFAULT_THRESHOLD
+    threshold: float = 0.5  # only read in hybrid mode, where it comes from the model or env
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:
@@ -136,7 +134,7 @@ def get_classifier_config() -> ClassifierConfig:
     model = TrainedModel.load(Path(os.environ.get("CLAIMS_CLASSIFIER_MODEL", DEFAULT_MODEL_PATH)))
     raw = os.environ.get("CLAIMS_HYBRID_THRESHOLD")
     try:
-        threshold = float(raw) if raw else model.metadata.get("threshold", DEFAULT_THRESHOLD)
+        threshold = float(raw) if raw else float(model.metadata["threshold"])
     except ValueError:
         raise ClassifierConfigError("CLAIMS_HYBRID_THRESHOLD must be a number") from None
     return ClassifierConfig(mode, model, threshold)
