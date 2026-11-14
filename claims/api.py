@@ -24,6 +24,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from claims.classifier import ClassifierConfig, get_classifier_config
 from claims.coverage import CoverageContext, assess_claim
 from claims.normalize import redact_ics
 from claims.providers import LLMProvider, get_provider
@@ -60,6 +61,7 @@ def create_app(
     register_path: Path | str | None = None,
     provider: LLMProvider | None = None,
     data_dir: Path | str | None = None,
+    classifier: ClassifierConfig | None = None,
 ) -> FastAPI:
     store = ClaimStore(db_path or os.environ.get("CLAIMS_DB", "data/claims.db"))
     register_file = Path(register_path or os.environ.get("CLAIMS_REGISTER", "data/policies.jsonl"))
@@ -69,6 +71,7 @@ def create_app(
         data_dir or os.environ.get("CLAIMS_DATA") or register_file.parent, register
     )
     llm = provider or get_provider()
+    classifier = classifier or get_classifier_config()  # fails fast on a bad model or mode
     _redact_access_log()
     app = FastAPI(title="Project Tabarru claim intake", version="0.1.0")
 
@@ -91,7 +94,7 @@ def create_app(
     def submit_claim(request: ClaimRequest) -> ClaimResponse:
         if store.exists(request.claim_id):
             raise HTTPException(409, "claim already exists")
-        claim = assess_claim(request.claim_id, request.documents, llm, ctx)
+        claim = assess_claim(request.claim_id, request.documents, llm, ctx, classifier)
         try:
             store.save(claim, request.documents)
         except DuplicateClaimError:

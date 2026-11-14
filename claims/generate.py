@@ -251,8 +251,9 @@ def make_facts(
     return facts
 
 
-# ---- Document templates: two layouts per type, label and value on one line
-# so that shuffled lines keep each pair intact.
+# ---- Document templates: three layouts per type, label and value on one line
+# so that shuffled lines keep each pair intact. Claim packets use layouts 0 and 1
+# (unchanged since Task 1); layout 2 is used only by classifier_dataset.
 
 
 def claim_form(f: dict, w: Writer, layout: int) -> list[str]:
@@ -276,6 +277,18 @@ def claim_form(f: dict, w: Writer, layout: int) -> list[str]:
                 f"Police Report No: {w.ocr(f['police_report_no'])}",
             ]
         return lines + ["Declaration: I confirm the above is true and complete. SPECIMEN ONLY"]
+    if layout == 2:
+        lines = [
+            "SPECIMEN TAKAFUL BENEFIT REQUEST",
+            f"Requestor: {f['participant_name']} / ID {w.ocr(f['participant_ic'])}",
+            f"Cert ref {w.ocr(f['certificate_no'])}, cover type {f['product'].lower()}",
+            f"Event on {w.date(f['incident_date'])}; sum claimed {w.money(f['amount_claimed'])}",
+        ]
+        if medical:
+            lines.append(f"Treated at {f['hospital_name']}")
+        else:
+            lines.append(f"Vehicle {w.ocr(f['vehicle_reg_no'])}: {f['cause_of_loss']}")
+        return lines + ["Signed by the participant. SPECIMEN, not a real request."]
     lines = [
         "NOTIFICATION OF CLAIM (SPECIMEN DOCUMENT)",
         "Section A - Participant",
@@ -315,6 +328,15 @@ def hospital_bill(f: dict, w: Writer, layout: int) -> list[str]:
             f"Procedures and investigations: {w.money(procedures)}",
             f"TOTAL AMOUNT DUE: {w.money(f['bill_total'])}",
         ]
+    if layout == 2:
+        return [
+            "INPATIENT CHARGES - SPECIMEN",
+            f"{f['hospital_name']}, billing office",
+            f"Bed stay {w.date(f['admission_date'])} to {w.date(f['discharge_date'])}",
+            f"Room and board, {f['nights']} nights at {w.money(f['room_rate_per_day'])}: {w.money(room)}",
+            f"Drugs dispensed {w.money(pharmacy)}; theatre and lab {w.money(procedures)}",
+            f"Balance payable {w.money(f['bill_total'])}",
+        ]
     return [
         "SPECIMEN STATEMENT OF ACCOUNT",
         f"Facility: {f['hospital_name']}",
@@ -340,6 +362,14 @@ def discharge_summary(f: dict, w: Writer, layout: int) -> list[str]:
             f"Final diagnosis: {f['diagnosis']}",
             "Attending physician: Dr Specimen Rahim",
         ]
+    if layout == 2:
+        return [
+            "SPECIMEN WARD RELEASE NOTE",
+            f"Ward: {f['hospital_name']}",
+            f"In {w.date(f['admission_date'])}, out {w.date(f['discharge_date'])}",
+            f"Condition treated: {f['diagnosis']}",
+            "Released home in stable condition. Medication explained. SPECIMEN",
+        ]
     return [
         "SPECIMEN - CLINICAL SUMMARY ON DISCHARGE",
         f["hospital_name"],
@@ -359,6 +389,14 @@ def repair_estimate(f: dict, w: Writer, layout: int) -> list[str]:
             f"Parts: {w.money(f['parts'])}",
             f"Labour: {w.money(f['labour'])}",
             f"Estimated repair total: {w.money(f['repair_total'])}",
+        ]
+    if layout == 2:
+        return [
+            "SPECIMEN BODYSHOP COSTING",
+            f"Workshop: {f['workshop']}, panel garage",
+            f"Car plate {w.ocr(f['vehicle_reg_no'])}",
+            f"Spares {w.money(f['parts'])} + man-hours {w.money(f['labour'])}",
+            f"Costing total {w.money(f['repair_total'])}",
         ]
     return [
         "SPECIMEN QUOTATION FOR REPAIRS",
@@ -381,6 +419,14 @@ def police_report(f: dict, w: Writer, layout: int) -> list[str]:
             f"Vehicle No: {w.ocr(f['vehicle_reg_no'])}",
             f"Statement: {f['cause_of_loss']}",
             "Investigating officer: Insp. Specimen Wong",
+        ]
+    if layout == 2:
+        return [
+            "SPECIMEN INCIDENT STATEMENT TO POLICE",
+            f"Ref {w.ocr(f['police_report_no'])} lodged at Ibu Pejabat Polis Daerah Contoh",
+            f"On {w.date(f['incident_date'])} vehicle {w.ocr(f['vehicle_reg_no'])} was involved:",
+            f"{f['cause_of_loss']}.",
+            "Investigating officer on duty: Kpl. Specimen Tan",
         ]
     return [
         "SPECIMEN - LAPORAN POLIS",
@@ -417,15 +463,28 @@ def hash_text(text: str) -> int:
     return value
 
 
-def render(rng: random.Random, claim: Claim, doc_type: str, noisy: bool) -> str:
+PACKET_LAYOUTS = 2  # claim packets draw from layouts 0 and 1 only
+LAYOUTS_PER_TYPE = 3
+
+
+def template_id(doc_type: str, layout: int) -> str:
+    return f"{doc_type}.t{layout}"
+
+
+def render(
+    rng: random.Random, claim: Claim, doc_type: str, noisy: bool, layout: int | None = None
+) -> tuple[str, str]:
+    """Return (text, template_id). With layout None a packet layout is drawn from rng."""
     w = Writer(rng, noisy)
-    lines = TEMPLATES[doc_type](claim.facts, w, rng.randrange(2))
+    if layout is None:
+        layout = rng.randrange(PACKET_LAYOUTS)
+    lines = TEMPLATES[doc_type](claim.facts, w, layout)
     if noisy:
         ref = f"{rng.randrange(16**6):06x}"
         lines = [rng.choice(NOISE_HEADERS).format(ref=ref), *lines, rng.choice(NOISE_FOOTERS)]
         if rng.random() < 0.5:
             rng.shuffle(lines)
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n", template_id(doc_type, layout)
 
 
 def build_claims(rng: random.Random, count: int) -> list[Claim]:
@@ -486,9 +545,16 @@ def write_dataset(count: int, seed: int, out: Path) -> None:
             doc_id = f"{rng.randrange(16**8):08x}"
             noisy = position in noisy_positions
             position += 1
-            text = render(rng, claim, doc_type, noisy)
+            text, template = render(rng, claim, doc_type, noisy)
             (folder / f"{doc_id}.txt").write_text(text, encoding="utf-8", newline="\n")
-            docs.append({"doc_id": doc_id, "doc_type": doc_type, "ocr_noise": noisy})
+            docs.append(
+                {
+                    "doc_id": doc_id,
+                    "doc_type": doc_type,
+                    "template_id": template,
+                    "ocr_noise": noisy,
+                }
+            )
         shown = set().union(*(FIELDS_SHOWN[d] for d in claim.doc_types))
         fields = {k: label_value(claim.facts.get(k)) for k in sorted(shown)}
         if claim.product == "MEDICAL":
@@ -530,6 +596,41 @@ def write_dataset(count: int, seed: int, out: Path) -> None:
         f"wrote {count} claims, {total_docs} documents ({len(noisy_positions)} with OCR noise), "
         f"{len(policies)} certificates to {out}"
     )
+
+
+# ---- Classifier dataset (Task 3)
+
+DOC_PRODUCTS = {
+    "claim_form": ["MEDICAL", "MOTOR"],
+    "hospital_bill": ["MEDICAL"],
+    "discharge_summary": ["MEDICAL"],
+    "repair_estimate": ["MOTOR"],
+    "police_report": ["MOTOR"],
+}
+
+
+def classifier_dataset(seed: int, per_class: int, layouts: list[int]) -> list[dict]:
+    """Labelled single documents for training or testing the document classifier.
+
+    Each row is {"text", "doc_type", "template_id", "ocr_noise"}. Only the listed
+    layouts are rendered, cycling through them, so a training set and a test set
+    built from disjoint layouts never share a template. Noise share and date and
+    amount styles are the same as in the claim packets.
+    """
+    rng = random.Random(seed)
+    rows = []
+    for doc_type, products in DOC_PRODUCTS.items():
+        for i in range(per_class):
+            # Product varies independently of layout, so a layout never implies a product.
+            product = products[(i // len(layouts)) % len(products)]
+            facts = make_facts(rng, i, product, "clean")
+            claim = Claim(f"DOC-{i:05d}", product, "clean", facts, [doc_type])
+            noisy = rng.random() < NOISE_SHARE
+            text, template = render(rng, claim, doc_type, noisy, layouts[i % len(layouts)])
+            rows.append(
+                {"text": text, "doc_type": doc_type, "template_id": template, "ocr_noise": noisy}
+            )
+    return rows
 
 
 def expected_codes(claim: Claim, fields: dict) -> list[str]:

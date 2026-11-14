@@ -29,6 +29,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from claims.classifier import ClassifierConfig
 from claims.normalize import contains_ic, redact_ics
 from claims.pipeline import _Step, describe_error, run_intake
 from claims.providers import LLMProvider, build_coverage_prompt
@@ -248,6 +249,8 @@ def assess_claim(
     documents: list[InputDocument],
     provider: LLMProvider,
     ctx: CoverageContext,
+    classifier: ClassifierConfig | None = None,
 ) -> ClaimDetail:
     """Intake then coverage: what POST /v1/claims and the evaluator run."""
-    return run_coverage(run_intake(claim_id, documents, provider, ctx.register), provider, ctx)
+    intake = run_intake(claim_id, documents, provider, ctx.register, classifier)
+    return run_coverage(intake, provider, ctx)

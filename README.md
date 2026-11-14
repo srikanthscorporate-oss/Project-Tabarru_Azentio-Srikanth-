@@ -580,14 +580,159 @@ Error sources seen:
    the fake copies sentences from the clause text; the guard itself is tested
    with injected faults.
 
+## Task 3: trained document classifier and comparison
+
+### Commands
+
+```bash
+uv run python -m claims.train_classifier                 # writes models/doc_classifier.joblib (about 0.3 s)
+uv run python -m claims.compare_classifiers --out reports/  # writes reports/classifier_comparison.json (about 0.2 s)
+CLAIMS_CLASSIFIER=hybrid uv run python -m claims.intake data/claims/CLM-0001/ --trace
+```
+
+Measured on this laptop: training 0.8 s and comparison 0.7 s wall clock,
+including interpreter start (training itself 0.26 s).
+
+### Data and template separation
+
+* The generator now has three layouts per document type. Template ids
+  (`claim_form.t0` ... `police_report.t2`) are in the generator metadata:
+  every row of `classifier_dataset` and every document in `labels.jsonl`
+  carries `template_id`. Separation is tested on that field, never on file
+  names.
+* Claim packets still use layouts 0 and 1 only, so the Task 1 and Task 2
+  documents for a given seed are byte-identical to before (`labels.jsonl`
+  only gains `template_id`). Layout 2 is used only for the classifier test set.
+* Training: seed 1301, layouts 0 and 1, 200 documents per class (1000).
+  Test: seed 2602, layout 2 only, 100 per class (500). Every held-out
+  template (`*.t2`) is absent from training. Training fails if any template
+  or any exact text appears in both sets, or if a class has fewer than 150
+  unique documents. Product (medical/motor claim form) varies independently
+  of layout. OCR noise (40%) and date and amount styles are the same as in the packets.
+* The test set is used only by `compare_classifiers`, never for settings or
+  the threshold.
+
+### Model
+
+scikit-learn `Pipeline`: `TfidfVectorizer(word 1-2 grams, lowercase,
+min_df=2, sublinear_tf)` then `LogisticRegression(C=1.0, max_iter=1000,
+random_state=0)`. Defaults, no search. The input is document text only; no
+doc type, template, claim id, file name or scenario. TF-IDF vocabulary and
+IDF are fitted inside the pipeline on training text only (a test checks that
+words found only in the held-out layout are not in the vocabulary).
+`predict` returns the type and its probability, read through
+`pipeline.classes_`.
+
+The artifact `models/doc_classifier.joblib` (gitignored, rebuilt by the
+command above) holds the pipeline plus metadata: classes, seeds, train and
+held-out template ids, settings, threshold and rule, Python, scikit-learn and
+joblib versions. It is a pickle: load only artifacts you built. No endpoint
+accepts a model file.
+
+### Runtime modes
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CLAIMS_CLASSIFIER` | `llm` | `llm`, `trained` or `hybrid` |
+| `CLAIMS_CLASSIFIER_MODEL` | `models/doc_classifier.joblib` | read only in trained and hybrid |
+| `CLAIMS_HYBRID_THRESHOLD` | threshold stored in the model | optional override, in (0, 1] |
+
+* `llm`: unchanged provider path (schema validation, one retry, failure).
+* `trained`: the model types every document, zero classification provider calls.
+* `hybrid`: the model's answer is kept when its top probability is `>=` the
+  threshold (equal counts as accepted); below it the document goes through
+  the same `call_with_retry` path as `llm`, so retries and failures behave the same.
+* Only `classify_documents` changes. Extraction and coverage always call
+  `CLAIMS_PROVIDER`. The step trace is unchanged: `provider_calls` on
+  `classify_documents` counts real classification calls including retries,
+  so trained shows 0 and hybrid shows only fallback calls.
+* The model loads once, when the API app or CLI starts, and only for trained
+  or hybrid. An unknown mode, a missing or invalid model, or a bad threshold
+  raises `ClassifierConfigError` with the fix (API startup fails, CLI exits
+  1). It never switches mode silently and never downloads anything.
+
+### Hybrid threshold
+
+0.40, chosen from training layouts only: fit on layout 0, predict layout 1,
+and the reverse. The rule is the smallest 0.05 step above the most confident
+wrong validation prediction, with a floor of 0.40 (twice the 0.20 probability
+of a uniform guess over five classes). The first version had no floor; after
+the product/layout fix there were no validation mistakes, the rule gave
+0.05 and hybrid would never have fallen back, so the floor was added. These
+validation numbers, not test numbers, drove that change. Logistic regression
+on TF-IDF gives low top probabilities here (median about 0.57 on an unseen
+layout) even when correct. The probabilities are not calibrated and I did not
+measure calibration: a high confidence does not mean the answer is right.
+
+### Results (held-out layout, 500 documents)
+
+From `reports/classifier_comparison.json`:
+
+| Option | Accuracy | Macro-F1 | Failed | LLM calls / 1k docs | Est. cost USD / 1k claims | Measured ms / doc (local) | Est. hosted LLM ms / doc |
+|---|---|---|---|---|---|---|---|
+| trained | 1.0000 | 1.0000 | 0 | 0.0 | 0.0000 | 0.18 | 0 |
+| llm (FakeProvider) | 0.8000 | 0.8000 | 100 | 1200.0 | 0.9207 | 0.011 | 960 |
+| hybrid | 0.9020 | 0.9351 | 49 | 220.0 | 0.1688 | 0.18 | 176 |
+
+* FakeProvider has no keywords for the new discharge layout ("ward release
+  note", "condition treated"), so all 100 fail after one retry (1200 calls
+  per 1000 documents: 1 per document plus a retry for the 100 failures).
+  Hybrid sends low-confidence documents to the same fake: 51 of the
+  discharge summaries were accepted by the model and 49 fell back and
+  failed, although the model had them right.
+* Failed documents stay in every denominator and appear in a `failed`
+  column of the confusion matrix (labels in `DocType` order).
+* Accuracy, F1, confusion matrices and call counts repeat exactly between
+  runs (checked twice, and by a test). Timings vary.
+* Measured latency is `time.perf_counter_ns` around `classify_documents` for
+  one document: model prediction, and for fallbacks the prompt, the
+  in-process fake, JSON parse, validation and retry. Model load (1.7 ms) is
+  reported separately. The fake's latency says nothing about a hosted LLM.
+* Estimates (hypothetical, not verified prices, no real provider was
+  called): 3.1 documents per claim (124/40 in the Task 1 data), 450 input
+  and 15 output tokens per classification call, USD 0.50 / 1.50 per million
+  input / output tokens, 800 ms per call, calls sequential. Cost is the
+  classification step only, not extraction or coverage, and uses the observed
+  call rate including retries.
+
+### Recommendation
+
+On this data the trained classifier alone is best: correct on every held-out
+document, no LLM calls, well under a millisecond. Hybrid is only as good as
+its fallback; here the fallback is the keyword fake, which is weaker than the
+model on the new layout, so hybrid lost 49 documents the model had right.
+For production I would run `trained`, or `hybrid` with a real LLM
+fallback once that LLM is measured on labelled documents to beat the model
+on low-confidence cases, and would keep the trained label (flagged) when the
+fallback fails. Either way, classification cost drops from about one call
+per document to the fallback rate.
+
+### Monitoring and retraining
+
+Track on a labelled sample: accuracy and macro-F1, per-class errors and the
+confusion matrix, the confidence distribution and hybrid fallback rate (a
+rising fallback rate is the first sign of a new layout), failure rate of the
+fallback, OCR noise level and new layouts or senders, and latency. Retrain
+when a new layout appears or per-class recall drops.
+
+### Limitations
+
+* Synthetic data from one author: three layouts per type, short fixed word
+  lists. 100% on the held-out layout shows the model generalises across
+  these layouts, not that it will on real scans.
+* The LLM row is the keyword FakeProvider, not a real model; real-model
+  accuracy, latency and cost were not measured.
+* Confidence is uncalibrated; the threshold rests on two small validation folds.
+* The trace does not record per-document confidence or whether the model or
+  the fallback answered; only `provider_calls` shows it.
+* sklearn is imported in every mode (the model file is loaded only when needed).
+
 ## What is next
 
 * Retrieval: weight claim-specific terms above the fixed base terms (the one
   measured miss), or retrieve once per question (period, exclusion, limit).
-* Task 3: trained TF-IDF + logistic regression classifier with held-out
-  layouts, `CLAIMS_CLASSIFIER=trained|llm|hybrid` selecting the
-  `classify_documents` implementation (the step already isolates
-  classification behind one function).
+* Hybrid: when the LLM fallback fails, keep the trained label flagged for
+  review instead of failing the document (see Task 3 results).
 * Cross-document conflict flags for names and dates, not only amounts.
 * Check the claim form's product against the register entry's product
   (today a MEDICAL claim on a MOTOR certificate is not flagged).

@@ -37,3 +37,6 @@ reports/
 .ruff_cache/
 .unlazy/
 artifacts/
+
+# Trained model artifacts (rebuild with python -m claims.train_classifier)
+models/
