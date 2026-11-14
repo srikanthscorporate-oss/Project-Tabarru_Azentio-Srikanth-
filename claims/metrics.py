@@ -61,7 +61,8 @@ def render(status_counts: dict[str, int]) -> str:
     with _lock:
         lines += [
             "# HELP tabarru_provider_retries_total Provider calls that were a retry after"
-            " malformed or invalid output, since process start.",
+            " malformed or invalid output, since process start. Counted while a claim is"
+            " assessed, so a rare concurrent duplicate later rejected with 409 is included.",
             "# TYPE tabarru_provider_retries_total counter",
         ]
         lines += [f'tabarru_provider_retries_total{{step="{s}"}} {_retries[s]}' for s in STEPS]
