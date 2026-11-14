@@ -73,8 +73,10 @@ def describe_error(exc: Exception) -> str:
     if isinstance(exc, json.JSONDecodeError):
         return f"output is not valid JSON ({exc.msg} at char {exc.pos})"
     if isinstance(exc, ValidationError):
+        # A location can hold a key the model invented, so it is redacted here,
+        # before the text reaches the retry prompt, the trace or the logs.
         problems = [
-            f"{'.'.join(str(p) for p in err['loc']) or 'root'}: {err['type']}"
+            f"{redact_ics('.'.join(str(p) for p in err['loc'])) or 'root'}: {err['type']}"
             for err in exc.errors(include_input=False, include_url=False)
         ]
         return "schema validation failed (" + ", ".join(problems) + ")"
@@ -164,6 +166,8 @@ def run_intake(
 
     step = _Step("assemble_claim", [d.doc_id for d in docs])
     merged["participant_ic"] = mask_ic(merged.get("participant_ic"))
+    # A model can copy an IC into any text field (name, diagnosis, cause of loss).
+    merged = {k: redact_ics(v) if isinstance(v, str) else v for k, v in merged.items()}
     fields = ClaimFields(**merged)
     if not processed:
         status = "failed"

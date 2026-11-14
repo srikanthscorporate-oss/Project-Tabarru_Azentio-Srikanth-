@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
 
-from claims.normalize import to_money
+from claims.normalize import contains_ic, to_money
 
 
 class DocType(str, Enum):
@@ -138,16 +138,26 @@ class TraceEntry(BaseModel):
 
 # ---- API contract
 
-_ID = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+
+def _not_ic(value: str) -> str:
+    # Ids are echoed in responses, the trace and logs, so they must not carry an IC.
+    if contains_ic(value):
+        raise ValueError("id must not contain an IC number")
+    return value
+
+
+Identifier = Annotated[
+    str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"), AfterValidator(_not_ic)
+]
 
 
 class InputDocument(_Strict):
-    doc_id: str = Field(pattern=_ID)
+    doc_id: Identifier
     text: str = Field(min_length=1, max_length=100_000)
 
 
 class ClaimRequest(_Strict):
-    claim_id: str = Field(pattern=_ID)
+    claim_id: Identifier
     documents: list[InputDocument] = Field(min_length=1, max_length=10)
 
     @field_validator("documents")

@@ -97,3 +97,7 @@ def mask_ic(ic: str | None) -> str | None:
 def redact_ics(text: str) -> str:
     """Mask every IC-shaped number inside free text (errors, stored documents)."""
     return _IC_PATTERN.sub(lambda m: f"XXXXXX-XX-{fix_ocr_digits(m.group(1))}", text)
+
+
+def contains_ic(text: str) -> bool:
+    return _IC_PATTERN.search(text) is not None
