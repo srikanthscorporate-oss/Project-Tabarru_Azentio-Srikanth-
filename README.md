@@ -4,12 +4,20 @@ A Python package, `claims`, that takes a packet of OCR'd claim documents for a
 synthetic Malaysian Takaful operator (motor and medical), classifies each
 document, extracts the claim fields through an `LLMProvider`, validates them
 against a typed schema, the certificate register and cross-document rules, and
-stores the claim with a step-by-step trace. It has a CLI and a FastAPI API.
+stores the claim with a step-by-step trace. It then retrieves certificate
+clauses, asks the provider for a cited coverage recommendation, computes the
+payable in code and holds every claim for a human adjuster. It has a CLI, a
+FastAPI API and a small HTML adjuster view.
 
-Status: **Tasks 1 and 2 are implemented and tested. Task 3 is not started**
-(no trained classifier yet). Task 2 adds clause retrieval, a cited coverage
-recommendation, payable calculation in code, an adjuster gate with an
-append-only audit table, and an evaluation command. See "Task 2" below.
+| Part | Status |
+| --- | --- |
+| Task 1: intake agent (generator, four traced steps, validation, SQLite, API, CLI) | Implemented and tested |
+| Task 2: retrieval, cited recommendation, payable, adjuster gate, audit, evaluation | Implemented and tested |
+| Task 3: trained document classifier, llm/trained/hybrid modes, comparison | Implemented and tested |
+| Stretch: adjuster view at `/` (trace, cited clauses, decisions, audit) | Implemented, browser-checked |
+| Stretch: Prometheus `/metrics` | Implemented and tested |
+| Stretch: Dockerfile and `docker compose up` | Built and run locally (see "Docker") |
+| Stretch: coverage evaluation with a real model vs fake | Tooling done; measured result in "Real-model comparison" |
 
 All data is synthetic and produced by `claims/generate.py`. Every document
 contains the word SPECIMEN. Names, IC numbers (place code `00`, which is not
@@ -25,8 +33,22 @@ uv sync                     # creates .venv with runtime + dev dependencies
 
 Without uv: `python -m venv .venv && . .venv/bin/activate && pip install fastapi pydantic uvicorn httpx pytest`.
 
-Runtime dependencies are only `fastapi`, `pydantic` and `uvicorn`. Everything
-else (SQLite, HTTP for the optional real provider, date parsing) is stdlib.
+Runtime dependencies are `fastapi`, `pydantic`, `uvicorn`, plus
+`scikit-learn` and `joblib` for the Task 3 classifier. Everything else
+(SQLite, HTTP for the optional real provider, date parsing, metrics) is stdlib.
+The adjuster view is three static files with no build step and no CDN.
+
+## Quick start
+
+```bash
+./start.sh     # installs deps, generates data if missing, seeds data/demo.db, serves :8000
+               # open http://localhost:8000/ (adjuster view), /docs (API), /metrics
+./stop.sh      # stops that server and, if running, the docker compose stack; data is kept
+```
+
+`PORT=9000 ./start.sh` changes the port. `start.sh` refuses to start twice;
+it keeps the server pid in `data/.tabarru.pid` for `stop.sh`. The view and the
+API are one FastAPI process, so there is no separate frontend server.
 
 ## Commands
 
@@ -44,7 +66,12 @@ uv run uvicorn --factory claims.api:create_app --port 8000
 # 4. Score coverage on all 40 claims (offline, about 0.1 s)
 uv run python -m claims.eval --provider fake --out reports/
 
-# 5. Tests and checks
+# 5. Adjuster view on a demo database (see "Stretch goals")
+uv run python -m claims.seed_demo --data data/ --db data/demo.db
+CLAIMS_DB=data/demo.db uv run uvicorn --factory claims.api:create_app --port 8000
+# open http://localhost:8000/
+
+# 6. Tests and checks
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
 ```
@@ -101,18 +128,23 @@ deletes both from reach and gets the same result).
 {"claim_id": "CLM-0001", "documents": [{"doc_id": "42c927b9", "text": "..."}]}
 ```
 
-returns 201 and
+returns 201 and (abridged, from the current seed 7 data)
 
 ```json
-{"claim_id": "CLM-0001", "status": "intake_complete",
- "documents": [{"doc_id": "42c927b9", "doc_type": "claim_form", "status": "processed"}],
- "fields": {"certificate_no": "MED-2026-100011", "product": "MEDICAL",
-            "participant_ic": "XXXXXX-XX-0791", "amount_claimed": "1570.00", "...": "..."},
- "reason_codes": []}
+{"claim_id": "CLM-0001", "status": "pending_adjuster", "intake_status": "intake_complete",
+ "documents": [{"doc_id": "34893498", "doc_type": "claim_form", "status": "processed"}, "..."],
+ "fields": {"certificate_no": "MED-2026-...", "product": "MEDICAL",
+            "participant_ic": "XXXXXX-XX-....", "amount_claimed": "1320.00", "...": "..."},
+ "reason_codes": [],
+ "recommendation": {"decision": "COVERED", "payable_amount": "1320.00", "reason_codes": [],
+                    "cited_clauses": [{"clause_id": "MED-2.1", "quote": "..."}], "rationale": "..."}}
 ```
 
-`GET /v1/claims/{claim_id}` returns the same object plus `trace`, a list of
-`{step, doc_ids, status, duration_ms, provider_calls, error}`.
+`status` is the workflow status; the Task 1 intake result is in
+`intake_status`. `GET /v1/claims/{claim_id}` returns the same object plus
+`trace` (`{step, doc_ids, status, duration_ms, provider_calls, error,
+clause_ids}`, five steps: the four Task 1 steps and `coverage`) and
+`adjuster_decision`.
 
 | Case | Response |
 | --- | --- |
@@ -135,12 +167,14 @@ rounding happens anywhere; dates as `YYYY-MM-DD`.
   |  2 extract_fields      --------+------>|  OpenAICompatible      |
   |  3 validate  (validation.py)   |       +------------------------+
   |  4 assemble_claim (mask IC)    |
+  |  5 coverage (coverage.py)  ----+------> retrieval.py (BM25 clauses)
   +---------------+----------------+
                   | ClaimDetail (fields, reason codes, trace)
        +----------+-----------+
        v                      v
-  storage.ClaimStore      intake.py (CLI) / api.py (FastAPI)
-  SQLite: claims, documents, trace
+  storage.ClaimStore      intake.py (CLI) / api.py (FastAPI) -> web/ (adjuster view)
+  SQLite: claims, documents,                      metrics.py (/metrics)
+          trace, audit
 ```
 
 | Module | Responsibility |
@@ -304,12 +338,12 @@ uv run python -m claims.intake data/claims/CLM-0001/
 The adapter posts to `<base>/chat/completions` with temperature 0 and strips
 a Markdown code fence from the answer. It goes through the same schema
 validation and retry as the fake. A failing endpoint fails documents; it
-never falls back to fake results. I have not run it against a live model in
-this round, so its accuracy is unmeasured.
+never falls back to fake results. `python -m claims.models` (see "Real-model
+comparison") lists local Ollama and Groq models and runs the comparison.
 
 ## Tests
 
-`uv run pytest` runs 91 tests in under a second. An autouse fixture removes
+`uv run pytest` runs 214 tests in about two seconds. An autouse fixture removes
 every `CLAIMS_*` variable and patches `socket` so any network connection
 raises; the real adapter test relies on that to prove it fails cleanly.
 Each test that touches SQLite uses its own `tmp_path` database, and the
@@ -488,8 +522,16 @@ curl -s -X POST localhost:8000/v1/claims/CLM-0001/adjuster-decision \
   equal the recommendation, otherwise 422 (no silent override).
 * `override` needs a non-blank `reason`, `final_decision` and `final_payable`
   (422 otherwise).
-* NOT_COVERED and REFER need `final_payable` 0.00; COVERED and
-  PARTIALLY_COVERED need more than 0.00.
+* NOT_COVERED and REFER need `final_payable` 0.00. COVERED needs more than
+  0.00.
+* Zero-payable policy: the pipeline can recommend PARTIALLY_COVERED with
+  0.00 (an excess that absorbs the whole repair cost). Approving that stored
+  recommendation is allowed. An adjuster override to PARTIALLY_COVERED needs
+  more than 0.00; an adjuster who wants a zero outcome overrides to
+  NOT_COVERED. Tests: `test_zero_payable_partial_recommendation_can_be_approved`,
+  `test_override_to_zero_payable_partial_is_422`.
+* The adjuster view always sends the decision and payable it showed in the
+  confirmation, so a stale view gets 422 instead of recording something else.
 * Unknown claim 404; a claim that is not `pending_adjuster` (already decided,
   or a Task 1 claim never assessed) 409.
 * `GET /v1/claims/{id}` returns `recommendation` (original, never changed)
@@ -727,6 +769,170 @@ when a new layout appears or per-class recall drops.
   the fallback answered; only `provider_calls` shows it.
 * sklearn is imported in every mode (the model file is loaded only when needed).
 
+## Stretch goals
+
+### Adjuster view
+
+A static HTML/CSS/JavaScript page in `claims/web/`, served by the same FastAPI
+app at `/` (assets under `/static/`). `/docs` still works. No build step, no
+Node, no CDN, no remote fonts: it works offline. It only calls the API below;
+every claim, amount, citation, trace entry and decision shown comes from it.
+
+Local start:
+
+```bash
+uv run python -m claims.generate --claims 40 --seed 7 --out data/   # if data/ is empty
+uv run python -m claims.seed_demo --data data/ --db data/demo.db    # repeatable
+CLAIMS_DB=data/demo.db uv run uvicorn --factory claims.api:create_app --port 8000
+# open http://localhost:8000/
+```
+
+Workflow: pick a claim in the queue, read facts and documents, open the cited
+clauses and the trace, then approve or override.
+
+* Queue (`GET /v1/adjuster/queue`): claim id, product, recommendation, payable,
+  reason codes. Search by claim id, filter by product and recommendation,
+  refresh. The counts line describes the loaded queue only. REFER is shown as
+  "Needs review", never as a rejection.
+* Claim (`GET /v1/claims/{id}`): workflow and intake status separately,
+  certificate, masked IC, facts for the product, documents with classified
+  type and status, intake and coverage reason codes (readable label, exact
+  code alongside), rationale. Claimed, recommended and final payable are shown
+  as three separate amounts, formatted from the backend's decimal strings
+  without float conversion. Missing values read "Not available".
+* Citations: clause id, exact quote, product, and a "Show source clause"
+  control that loads the clause from
+  `GET /v1/certificates/{product}/clauses/{clause_id}` and highlights the
+  quote. The note under the heading states exactly what the backend checked
+  (the quote is a substring of a clause retrieved for this claim). The source
+  is labelled as the current wording file, not a historical snapshot.
+* Trace: collapsed by default; per step status, duration, provider calls,
+  document ids, retrieved clause ids and the (already redacted) error. When
+  coverage was skipped, a sentence explains which intake problems caused the
+  referral.
+* Decision (`POST /v1/claims/{id}/adjuster-decision`): adjuster name (stated
+  as not a sign-in), approve or override (final decision, payable and a
+  required reason), then a confirmation dialog showing the exact decision and
+  payable. Approve sends those values, so the server rejects a stale view.
+  The submit button is disabled while the request runs. 422 shows field or
+  form errors; 409 reloads the claim and says it is no longer pending; a
+  dropped connection re-reads the claim before suggesting a retry. Decided
+  claims leave the queue and stay in "Opened this session". The word "paid"
+  or "settled" is never used: nothing is paid here.
+* Audit (`GET /v1/claims/{id}/audit`): timestamp, actor, event, decision,
+  payable, clause ids, reason. Read-only; the note says the SQLite triggers
+  block edits but are not cryptographic tamper proofing.
+
+Design (taste-skill house rules applied to an app screen): warm neutral
+ground, dark ink, one deep teal accent, system font stack, tabular figures for
+money, surfaces separated by tone instead of lines or shadows (only the modal
+dialog has one), flat square-ish buttons, no gradients, no icons, no
+decorative motion. Recommendation badges always carry words, so colour is
+never the only signal. Three columns on desktop, two on tablet, one on a
+phone.
+
+Safety and accessibility: all API text is inserted with `textContent` (a test
+fails if `innerHTML` or similar appears). Labelled controls, fieldset and
+legend for the action, `aria-invalid` with described-by messages, a native
+`<dialog>`, visible focus rings, focus moves to the outcome notice after a
+decision, one polite live region for "Loaded CLM-..." and outcomes, and
+`prefers-reduced-motion` turns transitions off.
+
+### Demo seeding
+
+`python -m claims.seed_demo --data data/ --db data/demo.db` runs every
+generated packet through `assess_claim` and `ClaimStore.save`, the same steps
+as POST, with FakeProvider fixed (no real model is ever called). Claims already
+in the database are skipped, nothing is deleted, and the dataset is only read.
+With seed 7 it gives, among others:
+
+| Example | Claim |
+| --- | --- |
+| Clean covered medical | CLM-0001 |
+| Motor partial (collision excess) | CLM-0002 |
+| Medical partial (room-rate limit) | CLM-0012 |
+| Excluded (motor) | CLM-0004 |
+| Missing document, referred | CLM-0005 |
+
+### Metrics
+
+`GET /metrics` returns Prometheus text format (version 0.0.4), written by
+`claims/metrics.py` with no extra dependency.
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `tabarru_claims` | gauge | `status` | Claims in SQLite by workflow status, read at scrape time |
+| `tabarru_provider_retries_total` | counter | `step` | Provider calls that were a second attempt after bad output |
+| `tabarru_citation_invalid_total` | counter | `product` | Claims whose citations were still invalid after the retry |
+| `tabarru_step_duration_seconds` | histogram | `step` | Step latency in seconds (buckets 1 ms to 30 s) |
+
+* Labels come from fixed lists only (status, step, product). Claim ids,
+  names, ICs, document text and error strings are never labels; a test checks.
+* Counters and the histogram live in the API process and reset when it
+  restarts. With several worker processes each keeps its own values. The
+  gauges come from SQLite, so they survive restarts.
+* Counters change only when a claim is processed. Scraping `/metrics` (or any
+  GET) does not change them; a test compares two scrapes.
+* A retry is counted only on the second attempt, never per call. Retries are
+  counted while the claim is assessed, so a rare concurrent duplicate that
+  then gets 409 is included.
+* `seed_demo`, `claims.eval` and the CLI run in their own processes, so their
+  work does not appear in the server's counters.
+
+### Docker
+
+```bash
+docker compose up --build -d          # serves http://localhost:8000/
+docker compose exec api python -m claims.seed_demo --data /data --db /data/claims.db
+docker compose down                   # the volume keeps the data
+```
+
+* `python:3.12-slim`, uv 0.13.1 (same as the lockfile), `uv sync --frozen
+  --no-dev` from `uv.lock`, runs as uid 10001, binds 0.0.0.0:8000.
+* `/data` is the named volume `tabarru-data` (dataset and `claims.db`). On
+  start the entrypoint generates the 40-claim seed 7 dataset only if
+  `/data/policies.jsonl` is missing, so an existing volume is never
+  overwritten. Seeding is a separate explicit command and is repeatable.
+* `CLAIMS_PROVIDER=fake` is set in `compose.yaml`. `.dockerignore` keeps
+  `.git`, `.venv`, `.env*` (except `.env.example`), `data/`, `models/` and
+  databases out of the image.
+* A bind mount (`./data:/data`) instead of the named volume must be writable
+  by uid 10001.
+* Pytest does not need Docker.
+
+Checked on this machine with Docker 29.9.2: the image built; the UI, `/docs`
+and `/metrics` answered 200; seeding gave 40 created then 40 already present;
+an approve returned 200; after `docker compose down` and `up` the decided claim
+and the `decided` gauge were still there; `id` inside the container showed uid
+10001; the image has no `.env.local`.
+
+### Real-model comparison
+
+Tooling: `python -m claims.models list` prints the models in the local
+Ollama server and the Groq account; `python -m claims.models run` asks for a
+source and model (or takes `--source`, `--model`), scores that model and
+FakeProvider on the same claims, and writes
+`reports/real/<source>__<model>/` (`coverage_eval.json` with run metadata,
+`fake_baseline.json`, `comparison.md`). `reports/coverage_eval.json` (the
+deterministic fake report) is not touched. Live runs are never part of pytest;
+`tests/test_models_cli.py` covers the tool offline.
+
+```bash
+uv run python -m claims.models list --env-file .env.local
+uv run python -m claims.models run --source ollama --model <name> --limit 10 --timeout 300
+```
+
+Measured so far (temperature 0, dataset seed 7, top-k 6, one retry):
+
+| Model | Claims | decision_accuracy | citation_invalid_rate | payable_exact_match | Fake on same claims (accuracy) | Elapsed |
+| --- | --- | --- | --- | --- | --- | --- |
+| Ollama llama3.1 8B (pilot) | first 4 | 0.5 | 0.0 | 1.0 | 1.0 | 72 s |
+
+A run of Ollama gemma-4-12b (QAT GGUF) on the first 10 claims is in progress
+and will be added when it finishes. Groq was listed but not run, by choice
+(no rate-limited remote runs). Four claims is too few to rank models; the
+pilot only shows that the pipeline runs end to end with a real model.
+
 ## What is next
 
 * Retrieval: weight claim-specific terms above the fixed base terms (the one
@@ -736,8 +942,7 @@ when a new layout appears or per-class recall drops.
 * Cross-document conflict flags for names and dates, not only amounts.
 * Check the claim form's product against the register entry's product
   (today a MEDICAL claim on a MOTOR certificate is not flagged).
-* Run the OpenAI-compatible adapter against a local Ollama model and record
-  its accuracy against `labels.jsonl`.
-
-The adjuster UI (a stretch goal) is the only visual work in scope; nothing
-visual is built yet.
+* Authentication for the adjuster view: the adjuster name is typed in and
+  recorded, it is not a sign-in.
+* Strip `<think>` blocks from reasoning models in the OpenAI-compatible
+  adapter, so those models can be compared too.
