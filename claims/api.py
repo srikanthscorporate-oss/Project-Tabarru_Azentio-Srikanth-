@@ -11,6 +11,7 @@ GET  /v1/claims/{claim_id}   200 with the claim and its trace; 404 if unknown.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -26,6 +27,21 @@ from claims.storage import ClaimStore, DuplicateClaimError
 from claims.validation import load_register
 
 
+class RedactIcFilter(logging.Filter):
+    """Masks IC-shaped text in log arguments, such as the URL path in uvicorn's access log."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(redact_ics(a) if isinstance(a, str) else a for a in record.args)
+        return True
+
+
+def _redact_access_log() -> None:
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, RedactIcFilter) for f in access.filters):
+        access.addFilter(RedactIcFilter())
+
+
 def create_app(
     db_path: Path | str | None = None,
     register_path: Path | str | None = None,
@@ -36,6 +52,7 @@ def create_app(
         Path(register_path or os.environ.get("CLAIMS_REGISTER", "data/policies.jsonl"))
     )
     llm = provider or get_provider()
+    _redact_access_log()
     app = FastAPI(title="Project Tabarru claim intake", version="0.1.0")
 
     @app.exception_handler(RequestValidationError)
