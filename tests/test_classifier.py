@@ -176,7 +176,7 @@ def test_tfidf_is_fitted_on_training_text_only(model):
 def test_threshold_comes_from_training_layouts():
     rows = classifier_dataset(4, 20, TRAIN_LAYOUTS)
     first = choose_threshold(rows)
-    assert 0.0 < first <= 1.0 and round(first / 0.05, 6).is_integer()
+    assert 0.4 <= first <= 1.0 and round(first / 0.05, 6).is_integer()
     assert choose_threshold(rows) == first  # deterministic
 
 
@@ -411,3 +411,11 @@ def test_api_uses_classifier_from_env(monkeypatch, model_path, dataset, labels, 
     monkeypatch.setenv("CLAIMS_CLASSIFIER", "bogus")
     with pytest.raises(ClassifierConfigError):
         create_app(tmp_path / "t4.db", dataset / "policies.jsonl", FakeProvider())
+
+
+def test_product_does_not_follow_layout():
+    rows = [r for r in train_rows() if r["doc_type"] == "claim_form"]
+    for template in {r["template_id"] for r in rows}:
+        texts = [r["text"] for r in rows if r["template_id"] == template]
+        motor = sum("ehicle" in t for t in texts)
+        assert 0 < motor < len(texts), template  # both products in every layout

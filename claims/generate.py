@@ -621,7 +621,8 @@ def classifier_dataset(seed: int, per_class: int, layouts: list[int]) -> list[di
     rows = []
     for doc_type, products in DOC_PRODUCTS.items():
         for i in range(per_class):
-            product = products[i % len(products)]
+            # Product varies independently of layout, so a layout never implies a product.
+            product = products[(i // len(layouts)) % len(products)]
             facts = make_facts(rng, i, product, "clean")
             claim = Claim(f"DOC-{i:05d}", product, "clean", facts, [doc_type])
             noisy = rng.random() < NOISE_SHARE
