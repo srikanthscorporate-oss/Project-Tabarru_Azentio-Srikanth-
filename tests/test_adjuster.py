@@ -273,7 +273,7 @@ def test_zero_payable_partial_recommendation_can_be_approved(client, dataset, la
     assert record.final_payable == Decimal("0.00")
 
 
-def test_override_to_zero_payable_partial_is_allowed(client, dataset, labels):
+def test_override_to_zero_payable_partial_is_422(client, dataset, labels):
     label = label_for(labels, "covered", "MEDICAL")
     submit(client, dataset, label)
     body = {
@@ -283,5 +283,23 @@ def test_override_to_zero_payable_partial_is_allowed(client, dataset, labels):
         "final_payable": "0.00",
         "reason": "excess absorbs the loss",
     }
+    response = client.post(f"/v1/claims/{label['claim_id']}/adjuster-decision", json=body)
+    assert response.status_code == 422
+
+
+def test_approve_with_stale_payable_is_422(client, dataset, labels):
+    # The view sends the decision and payable it showed; a mismatch must not be recorded.
+    label = label_for(labels, "covered", "MEDICAL")
+    claim = submit(client, dataset, label)
+    rec = claim["recommendation"]
+    body = {
+        "adjuster": "a",
+        "action": "approve",
+        "final_decision": rec["decision"],
+        "final_payable": "1.23",
+    }
+    response = client.post(f"/v1/claims/{label['claim_id']}/adjuster-decision", json=body)
+    assert response.status_code == 422
+    body["final_payable"] = rec["payable_amount"]
     response = client.post(f"/v1/claims/{label['claim_id']}/adjuster-decision", json=body)
     assert response.status_code == 200

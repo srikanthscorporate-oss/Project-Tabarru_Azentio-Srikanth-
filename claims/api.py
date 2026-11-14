@@ -192,13 +192,14 @@ def _decision_record(body: AdjusterDecisionRequest, claim: ClaimDetail) -> Adjus
         decision, payable = body.final_decision, body.final_payable
     if decision in (Decision.NOT_COVERED, Decision.REFER) and payable != 0:
         raise HTTPException(422, "final_payable must be 0.00 for NOT_COVERED and REFER")
-    # Zero-payable policy: PARTIALLY_COVERED may carry 0.00 (for example an excess
-    # that absorbs the whole loss), so approving that recommendation is allowed.
-    # COVERED always needs a payable above 0.00.
+    # Zero-payable policy: the pipeline may recommend PARTIALLY_COVERED with 0.00
+    # (an excess that absorbs the whole loss); approving that stored
+    # recommendation is allowed. An adjuster override to PARTIALLY_COVERED or
+    # COVERED needs a payable above 0.00; a zero outcome is overridden as NOT_COVERED.
     if decision is Decision.COVERED and payable <= 0:
         raise HTTPException(422, "final_payable must be above 0.00 for COVERED")
-    if decision is Decision.PARTIALLY_COVERED and payable < 0:
-        raise HTTPException(422, "final_payable must not be negative")
+    if body.action == "override" and decision is Decision.PARTIALLY_COVERED and payable <= 0:
+        raise HTTPException(422, "an override to PARTIALLY_COVERED needs final_payable above 0.00")
     return AdjusterDecisionRecord(
         adjuster=redact_ics(body.adjuster),
         action=body.action,
