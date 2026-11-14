@@ -196,6 +196,7 @@ async function openClaim(claimId, notice = null) {
     return null;
   }
   state.claim = res.body;
+  announce(`Loaded ${claimId}`);
   state.recent.set(claimId, res.body);
   renderQueue();
   renderClaim(res.body);
@@ -349,7 +350,8 @@ async function loadAudit(claimId) {
 function renderDecision(claim, notice) {
   const panel = $("decision-panel");
   const parts = [el("h2", {}, "Decision")];
-  if (notice) parts.push(el("p", { class: `form-msg ${notice.kind}`, role: notice.kind === "error" ? "alert" : "status" }, notice.text));
+  const noticeEl = notice ? el("p", { class: `form-msg ${notice.kind}`, tabindex: "-1" }, notice.text) : null;
+  if (noticeEl) parts.push(noticeEl);
   const rec = claim.recommendation;
   if (claim.adjuster_decision) {
     const d = claim.adjuster_decision;
@@ -369,11 +371,20 @@ function renderDecision(claim, notice) {
     el("p", { class: "hint" }, "Read-only. The database blocks edits and deletes; this is not cryptographic tamper proofing."),
     el("ul", { class: "audit", id: "audit-list" }, el("li", {}, "Loading...")));
   panel.replaceChildren(...parts);
+  if (noticeEl) {
+    noticeEl.focus();
+    announce(notice.text);
+  }
+}
+
+function announce(text) {
+  $("announcer").textContent = "";
+  setTimeout(() => { $("announcer").textContent = text; }, 50);
 }
 
 function decisionForm(claim) {
   const rec = claim.recommendation;
-  const msg = el("div", { id: "form-msg", "aria-live": "assertive" });
+  const msg = el("div", { id: "form-msg" });
   const errorFor = (id) => el("p", { class: "field-error", id: `${id}-error`, hidden: true });
   const adjuster = el("input", { id: "adjuster", maxlength: "64", autocomplete: "off", "aria-describedby": "adjuster-hint adjuster-error" });
   const approve = el("input", { type: "radio", name: "action", value: "approve", checked: true });
@@ -386,7 +397,7 @@ function decisionForm(claim) {
   const overrideFields = el("div", { hidden: true },
     el("div", { class: "field" }, el("label", { for: "final-decision" }, "Final decision"), finalDecision, errorFor("final-decision")),
     el("div", { class: "field" }, el("label", { for: "final-payable" }, "Final payable (MYR)"), payable,
-      el("p", { class: "hint", id: "final-payable-hint" }, "Two decimal places. 0.00 for Not covered and Needs review."), errorFor("final-payable")),
+      el("p", { class: "hint", id: "final-payable-hint" }, "Two decimal places. 0.00 for Not covered and Needs review; above 0.00 otherwise."), errorFor("final-payable")),
     el("div", { class: "field" }, el("label", { for: "reason" }, "Override reason (required)"), reason, errorFor("reason")));
   const submit = el("button", { type: "submit", class: "btn btn-primary btn-block" }, "Review and record");
 
@@ -416,6 +427,11 @@ function decisionForm(claim) {
     if (state.submitting) return;
     const fieldErrors = {};
     const body = { adjuster: adjuster.value.trim(), action: override.checked ? "override" : "approve" };
+    if (!override.checked) {
+      // Send what the adjuster is confirming; the server rejects it if the stored recommendation differs.
+      body.final_decision = rec.decision;
+      body.final_payable = rec.payable_amount;
+    }
     if (!body.adjuster) fieldErrors.adjuster = "Enter your name or ID.";
     if (override.checked) {
       body.final_decision = finalDecision.value;
@@ -424,7 +440,7 @@ function decisionForm(claim) {
       if (!body.reason) fieldErrors.reason = "An override needs a reason.";
       if (!MONEY_PATTERN.test(body.final_payable)) fieldErrors["final-payable"] = "Enter an amount such as 1250.00.";
       else if (["NOT_COVERED", "REFER"].includes(body.final_decision) && Number(body.final_payable) !== 0) fieldErrors["final-payable"] = "Must be 0.00 for this decision.";
-      else if (body.final_decision === "COVERED" && Number(body.final_payable) <= 0) fieldErrors["final-payable"] = "Covered needs an amount above 0.00.";
+      else if (["COVERED", "PARTIALLY_COVERED"].includes(body.final_decision) && Number(body.final_payable) <= 0) fieldErrors["final-payable"] = "Needs an amount above 0.00. For a zero outcome choose Not covered.";
       if (body.final_decision === rec.decision && body.final_payable && Number(body.final_payable) === Number(rec.payable_amount)) {
         fieldErrors["final-decision"] = "This matches the recommendation. Choose Approve instead.";
       }
@@ -435,10 +451,8 @@ function decisionForm(claim) {
       return;
     }
     msg.replaceChildren();
-    const finalDec = body.action === "approve" ? rec.decision : body.final_decision;
-    const finalPay = body.action === "approve" ? rec.payable_amount : body.final_payable;
-    if (!(await confirmDecision(claim.claim_id, body, finalDec, finalPay))) return;
-    await submitDecision(claim.claim_id, body, form, submit, msg);
+    if (!(await confirmDecision(claim.claim_id, body, body.final_decision, body.final_payable))) return;
+    await submitDecision(claim.claim_id, body, form, submit, msg, sync);
   });
   return form;
 }
@@ -472,7 +486,7 @@ function confirmDecision(claimId, body, decision, payable) {
   });
 }
 
-async function submitDecision(claimId, body, form, submit, msg) {
+async function submitDecision(claimId, body, form, submit, msg, sync) {
   state.submitting = true;
   submit.disabled = true;
   submit.textContent = "Recording...";
@@ -485,28 +499,37 @@ async function submitDecision(claimId, body, form, submit, msg) {
   state.submitting = false;
   if (res === null) {
     // The request may or may not have reached the server: read the current state before any retry.
-    const current = await openClaim(claimId);
     await loadQueue();
-    if (current && current.status === "decided") {
-      renderDecision(current, { kind: "info", text: "The connection dropped, but the claim shows as decided. Check that the recorded decision below is yours." });
-    } else if (current) {
-      renderDecision(current, { kind: "error", text: "The connection dropped and no decision was recorded. You can submit again." });
+    if (state.selected !== claimId) return;
+    let current = null;
+    try {
+      const check = await api(`/v1/claims/${encodeURIComponent(claimId)}`);
+      current = check.ok ? check.body : null;
+    } catch { current = null; }
+    if (current === null) {
+      msg.replaceChildren(el("p", { class: "form-msg error" }, "The connection dropped and the outcome is unknown. Reload this claim before trying again."));
+      return;
     }
+    await openClaim(claimId, current.status === "decided"
+      ? { kind: "info", text: "The connection dropped, but the claim shows as decided. Check that the recorded decision below is yours." }
+      : { kind: "error", text: "The connection dropped and no decision was recorded. You can submit again." });
     return;
   }
   if (res.ok) {
     state.recent.set(claimId, res.body);
     await loadQueue();
+    if (state.selected !== claimId) return;
     await openClaim(claimId, { kind: "ok", text: "Decision recorded. The claim has left the pending queue." });
     return;
   }
   if (res.status === 409) {
     await loadQueue();
+    if (state.selected !== claimId) return;
     await openClaim(claimId, { kind: "info", text: "This claim is no longer pending: another decision was already recorded. The current state is shown." });
     return;
   }
   submit.disabled = false;
-  submit.textContent = "Review and record";
+  sync();
   const detail = res.body && res.body.detail;
   let text = `The decision was not recorded (HTTP ${res.status}).`;
   if (typeof detail === "string") text = `The decision was not recorded: ${detail}.`;

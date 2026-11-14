@@ -65,7 +65,7 @@
       </form>
     </section>
 
-    <section class="review" id="review" aria-live="polite" aria-busy="false">
+    <section class="review" id="review" aria-label="Claim review" aria-busy="false">
       <div class="empty-state">
         <h2>Select a claim</h2>
         <p>Choose a claim from the queue to review its facts, evidence and recommendation.</p>
@@ -74,6 +74,8 @@
 
     <aside class="decision" id="decision-panel" aria-label="Decision"></aside>
   </main>
+
+  <p id="announcer" class="visually-hidden" role="status" aria-live="polite"></p>
 
   <dialog id="confirm" aria-labelledby="confirm-title">
     <form method="dialog" class="confirm-body">
