@@ -81,7 +81,9 @@ def to_money(value: Decimal) -> Decimal:
     return value.quantize(CENT, rounding=ROUND_HALF_UP)
 
 
-_IC_PATTERN = re.compile(r"(?<![0-9A-Za-z])[0-9OIl]{6}-?[0-9OIl]{2}-?([0-9OIl]{4})(?![0-9A-Za-z])")
+_IC_PATTERN = re.compile(
+    r"(?<![0-9A-Za-z])[0-9OoIl]{6}[- ]?[0-9OoIl]{2}[- ]?([0-9OoIl]{4})(?![0-9A-Za-z])"
+)
 
 
 def mask_ic(ic: str | None) -> str | None:

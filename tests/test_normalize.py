@@ -57,3 +57,8 @@ def test_mask_and_redact_ic():
     redacted = redact_ics(text)
     assert "XXXXXX-XX-1234" in redacted
     assert "900101" not in redacted and "9OO1O1" not in redacted
+
+
+@pytest.mark.parametrize("ic", ["900101 00 1234", "9oo101-00-1234", "900101001234"])
+def test_redact_other_ic_spellings(ic):
+    assert redact_ics(f"NRIC {ic} end") == "NRIC XXXXXX-XX-1234 end"
