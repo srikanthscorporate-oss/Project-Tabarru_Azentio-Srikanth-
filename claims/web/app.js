@@ -28,6 +28,11 @@ const CODE_LABEL = {
   INTAKE_FAILED: "No document could be processed",
   INTAKE_INCOMPLETE: "Intake did not complete cleanly",
 };
+const EVENT_LABEL = {
+  recommendation: "Recommendation recorded",
+  adjuster_approve: "Adjuster approved",
+  adjuster_override: "Adjuster overrode",
+};
 const FIELD_LABEL = [
   ["certificate_no", "Certificate number"],
   ["product", "Product"],
@@ -219,7 +224,8 @@ function renderClaim(claim) {
 
   const amounts = el("dl", { class: "amounts" },
     el("div", { class: "amount" }, el("dt", {}, "Claimed"), el("dd", {}, myr(f.amount_claimed))),
-    el("div", { class: "amount" }, el("dt", {}, "Recommended payable"), el("dd", {}, rec ? myr(rec.payable_amount) : show(null))),
+    el("div", { class: "amount" }, el("dt", {}, "Recommended payable"), el("dd", {}, rec ? myr(rec.payable_amount) : show(null)),
+      rec && rec.decision === "REFER" ? el("p", { class: "hint" }, "Not assessed: referred to an adjuster.") : null),
     el("div", { class: "amount final" }, el("dt", {}, "Final payable (adjuster)"),
       el("dd", {}, decided ? myr(decided.final_payable) : el("span", { class: "missing" }, "Not decided yet"))));
 
@@ -292,7 +298,7 @@ async function toggleSource(button, box, product, cited) {
     box.replaceChildren(
       el("p", { class: "hint" }, "Current certificate wording, not a historical snapshot. The highlight shows where the quote appears."),
       el("p", { style: "margin-top:8px" }, el("span", { class: "code" }, res.body.clause_id), " ", ...body),
-      at < 0 ? el("p", { class: "hint" }, "The quote does not appear in the current wording, which may have changed since assessment.") : null);
+      ...(at < 0 ? [el("p", { class: "hint" }, "The quote does not appear in the current wording, which may have changed since assessment.")] : []));
     box.dataset.loaded = "1";
   } catch {
     box.replaceChildren("Could not load the clause. Check the connection.");
@@ -328,7 +334,7 @@ async function loadAudit(claimId) {
     if (state.selected !== claimId) return;
     if (!res.ok) { holder.replaceChildren(el("li", {}, `Audit history unavailable (HTTP ${res.status}).`)); return; }
     holder.replaceChildren(...(res.body.length ? res.body.map((e) => el("li", {},
-      el("strong", {}, e.event.replace(/_/g, " ")),
+      el("strong", {}, EVENT_LABEL[e.event] || e.event),
       el("span", { class: "num" }, e.timestamp),
       el("span", {}, `By ${e.actor}`),
       el("span", {}, `${DECISION_LABEL[e.decision] || e.decision}, `, myr(e.payable)),
