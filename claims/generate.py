@@ -24,6 +24,8 @@ from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+from claims.wording import CERTIFICATES, SCHEDULES
+
 FIRST_NAMES = ["Aminah", "Farid", "Mei Ling", "Rajesh", "Siti", "Daniel", "Kavitha", "Hafiz"]
 SURNAMES = ["Contoh", "Specimen", "Sampel", "Ujian"]
 HOSPITALS = [
@@ -44,11 +46,33 @@ CAUSES = [
     "fallen tree branch on the roof",
 ]
 ACCIDENT_DIAGNOSIS = "Fractured left radius after road accident"
+COSMETIC_DIAGNOSES = ["Cosmetic rhinoplasty for appearance", "Elective cosmetic liposuction"]
+# Special perils carry no excess; collision causes do (see MTR-5.1).
+SPECIAL_PERIL_CAUSES = ["flood damage during heavy rain", "fallen tree branch on the roof"]
+COLLISION_CAUSES = [
+    "collision with another vehicle at a junction",
+    "hit a stationary object while reversing",
+]
+EXCLUDED_CAUSES = [
+    "damaged while taking part in a racing event at a circuit",
+    "collision while driven by an unlicensed driver",
+]
 WORKSHOPS = ["Bengkel Contoh Jaya", "Specimen Auto Works"]
 PLATE_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXY"  # Malaysian plates skip I and O
 # Share of documents that get OCR noise. Chosen by a seeded sample rather than a
 # per-document coin flip, so every run meets the 25% minimum, even a small one.
 NOISE_SHARE = 0.4
+
+# Task 2 coverage variant for each "clean" slot of the cycle, keyed by the
+# slot index. Anomaly slots are referred by intake (coverage variant "refer").
+COVERAGE_CYCLE = {
+    0: "covered",
+    1: "partial",
+    3: "outside_period",
+    5: "waiting_period",
+    7: "excluded",
+    9: "covered",
+}
 
 # Scenario per claim index, cycling every ten claims: 6 clean, 1 of each anomaly.
 SCENARIO_CYCLE = [
@@ -109,6 +133,7 @@ class Claim:
     scenario: str
     facts: dict
     doc_types: list[str] = field(default_factory=list)
+    variant: str = "refer"  # Task 2 coverage scenario
 
 
 class Writer:
@@ -151,12 +176,18 @@ def money(value: float | int) -> Decimal:
     return Decimal(str(value)).quantize(Decimal("0.01"))
 
 
-def make_facts(rng: random.Random, index: int, product: str, scenario: str) -> dict:
+def make_facts(
+    rng: random.Random, index: int, product: str, scenario: str, variant: str = "refer"
+) -> dict:
     name = f"{rng.choice(FIRST_NAMES)} {rng.choice(SURNAMES)}"
     birth = date(1960, 1, 1) + timedelta(days=rng.randrange(14000))
     ic = f"{birth:%y%m%d}-00-{rng.randrange(10000):04d}"  # place code 00 is not issued
     incident = date(2026, 1, 5) + timedelta(days=rng.randrange(280))
     start = incident - timedelta(days=rng.randrange(30, 300))
+    if variant == "outside_period":
+        start = incident + timedelta(days=rng.randrange(10, 60))  # loss before cover starts
+    elif variant == "waiting_period":
+        start = incident - timedelta(days=rng.randrange(3, 25))  # inside the 30-day wait
     prefix = "MED" if product == "MEDICAL" else "MTR"
     facts: dict = {
         "certificate_no": f"{prefix}-2026-{100000 + index * 37 + rng.randrange(30):06d}",
@@ -176,13 +207,14 @@ def make_facts(rng: random.Random, index: int, product: str, scenario: str) -> d
             else:
                 admission = incident - timedelta(days=rng.randrange(1, 4))
         nights = max((discharge - admission).days, 1)
-        rate = money(rng.choice([150, 200, 250, 300, 400]))
+        rates = [300, 350, 400] if variant == "partial" else [150, 200, 250]
+        rate = money(rng.choice(rates))
         other = [money(rng.randrange(80, 900)), money(rng.randrange(100, 2500))]
         total = rate * nights + sum(other)
         facts |= {
             "admission_date": admission,
             "discharge_date": discharge,
-            "diagnosis": rng.choice(DIAGNOSES),
+            "diagnosis": rng.choice(COSMETIC_DIAGNOSES if variant == "excluded" else DIAGNOSES),
             "hospital_name": rng.choice(HOSPITALS),
             "room_rate_per_day": rate,
             "nights": nights,
@@ -197,7 +229,13 @@ def make_facts(rng: random.Random, index: int, product: str, scenario: str) -> d
         facts |= {
             "vehicle_reg_no": f"{''.join(rng.choice(PLATE_LETTERS) for _ in range(3))} "
             f"{rng.randrange(1, 9999)}",
-            "cause_of_loss": rng.choice(CAUSES),
+            "cause_of_loss": rng.choice(
+                {
+                    "covered": SPECIAL_PERIL_CAUSES,
+                    "partial": COLLISION_CAUSES,
+                    "excluded": EXCLUDED_CAUSES,
+                }.get(variant, CAUSES)
+            ),
             "police_report_no": f"PR/2026/{rng.randrange(1, 999999):06d}",
             "parts": parts.quantize(Decimal("0.01")),
             "labour": labour,
@@ -397,11 +435,18 @@ def build_claims(rng: random.Random, count: int) -> list[Claim]:
         product = "MEDICAL" if (i + i // len(SCENARIO_CYCLE)) % 2 == 0 else "MOTOR"
         if scenario == "date_order_invalid":
             product = "MEDICAL"  # the date-order rule is defined on admission/discharge
-        facts = make_facts(rng, i, product, scenario)
+        variant = COVERAGE_CYCLE.get(i % len(SCENARIO_CYCLE), "refer")
+        if variant == "waiting_period":
+            product = "MEDICAL"  # waiting periods apply to medical illness only
+        facts = make_facts(rng, i, product, scenario, variant)
         doc_types = list(REQUIRED_DOCS[product])
         if scenario == "missing_document":
             doc_types.remove(rng.choice(doc_types[1:]))
-        elif product == "MEDICAL" and rng.random() < 0.25:
+        elif (
+            product == "MEDICAL"
+            and variant not in ("waiting_period", "excluded")
+            and rng.random() < 0.25
+        ):
             # Road-accident hospitalisation: packet also carries a police report.
             doc_types.append("police_report")
             facts["diagnosis"] = ACCIDENT_DIAGNOSIS
@@ -409,7 +454,7 @@ def build_claims(rng: random.Random, count: int) -> list[Claim]:
             facts["police_report_no"] = f"PR/2026/{rng.randrange(1, 999999):06d}"
             facts["vehicle_reg_no"] = f"{''.join(rng.choice(PLATE_LETTERS) for _ in range(3))} 77"
         rng.shuffle(doc_types)
-        claims.append(Claim(f"CLM-{i + 1:04d}", product, scenario, facts, doc_types))
+        claims.append(Claim(f"CLM-{i + 1:04d}", product, scenario, facts, doc_types, variant))
     return claims
 
 
@@ -460,6 +505,8 @@ def write_dataset(count: int, seed: int, out: Path) -> None:
                 "documents": docs,
                 "fields": fields,
                 "expected_reason_codes": expected_codes(claim, fields),
+                "coverage_scenario": claim.variant,
+                **expected_coverage(claim),
             }
         )
 
@@ -478,6 +525,7 @@ def write_dataset(count: int, seed: int, out: Path) -> None:
     ]
     write_jsonl(out / "policies.jsonl", sorted(policies, key=lambda p: p["certificate_no"]))
     write_jsonl(out / "labels.jsonl", labels)
+    write_certificates(out)
     print(
         f"wrote {count} claims, {total_docs} documents ({len(noisy_positions)} with OCR noise), "
         f"{len(policies)} certificates to {out}"
@@ -489,6 +537,56 @@ def expected_codes(claim: Claim, fields: dict) -> list[str]:
     if any(fields.get(k) is None for k in REQUIRED_FIELDS[claim.product]):
         codes.append("FIELDS_INCOMPLETE")
     return codes
+
+
+def expected_coverage(claim: Claim) -> dict:
+    """Ground truth for Task 2, worked out from the generator's own facts.
+
+    It does not call the runtime coverage or payable code. Clause ids are the
+    clauses that decide the outcome; REFER claims expect no clauses.
+    """
+    f, medical = claim.facts, claim.product == "MEDICAL"
+    decision, clauses, payable = "REFER", [], Decimal("0.00")
+    if claim.variant == "outside_period":
+        decision, clauses = "NOT_COVERED", ["MED-1.2" if medical else "MTR-1.2"]
+    elif claim.variant == "waiting_period":
+        decision, clauses = "NOT_COVERED", ["MED-3.1"]
+    elif claim.variant == "excluded":
+        if medical:
+            clauses = ["MED-5.1"]
+        else:
+            clauses = ["MTR-4.1" if "racing" in f["cause_of_loss"] else "MTR-4.2"]
+        decision = "NOT_COVERED"
+    elif claim.variant in ("covered", "partial"):
+        if medical:
+            room_limit = Decimal(SCHEDULES["MEDICAL"]["room_board_per_day"])
+            over = max(f["room_rate_per_day"] - room_limit, Decimal(0)) * f["nights"]
+            gross = f["bill_total"] - over
+            cap = min(Decimal(SCHEDULES["MEDICAL"]["annual_limit"]), f["sum_covered"])
+            clauses = ["MED-4.1"] if over else ["MED-2.1"]
+        else:
+            excess = Decimal(SCHEDULES["MOTOR"]["excess"])
+            over = excess if f["cause_of_loss"] in COLLISION_CAUSES else Decimal(0)
+            gross = f["repair_total"] - over
+            cap = f["sum_covered"]
+            clauses = ["MTR-5.1"] if over else ["MTR-2.1"]
+        payable = max(min(gross, cap, f["amount_claimed"]), Decimal(0))
+        decision = "PARTIALLY_COVERED" if over else "COVERED"
+    return {
+        "expected_decision": decision,
+        "expected_clause_ids": clauses,
+        "expected_payable": f"{payable:.2f}",
+    }
+
+
+def write_certificates(out: Path) -> None:
+    (out / "certificates").mkdir(exist_ok=True)
+    (out / "schedules").mkdir(exist_ok=True)
+    for product, text in CERTIFICATES.items():
+        (out / "certificates" / f"{product}.md").write_text(text, encoding="utf-8", newline="\n")
+        (out / "schedules" / f"{product}.json").write_text(
+            json.dumps(SCHEDULES[product], indent=2) + "\n", encoding="utf-8", newline="\n"
+        )
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
