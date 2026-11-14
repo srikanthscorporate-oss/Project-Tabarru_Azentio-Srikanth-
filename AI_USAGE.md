@@ -167,3 +167,46 @@ goes through the same `complete()` call and guardrails but is untested
 against a live endpoint. The one evaluation error (CLM-0038, cosmetic
 exclusion not retrieved) was left in place and reported rather than fixed by
 adjusting the query to this dataset.
+
+## Task 3: trained classifier
+
+Same setup: Claude Code (VS Code extension, Opus model) wrote the code, tests
+and docs from my prompt in `artifacts/task-3.md` (abridged: TF-IDF plus
+logistic regression, held-out layouts, `CLAIMS_CLASSIFIER=trained|llm|hybrid`
+reusing the existing retry path, a comparison report with honest cost and
+latency labels, no leakage, independent review). A code-reviewer subagent
+reviewed the branch without the main agent's conclusions. No real LLM was
+called; the LLM option is FakeProvider throughout.
+
+Where the AI was wrong and how it was caught:
+
+* **Fixed threshold of 0.80 chosen without looking at confidences.** The
+  first model put 499 of 500 held-out documents below 0.80, so hybrid would
+  have called the LLM for almost everything. This was seen on the test set,
+  which is a leak of sorts; the replacement rule is computed from training
+  layouts only (leave one training layout out) and the test set was not used
+  to choose it.
+* **Product confounded with layout** (reviewer, Required). In the classifier
+  dataset both product and layout came from `i % 2`, so every training claim
+  form on layout 0 was medical and every one on layout 1 was motor. The
+  model could learn "layout 0 means medical" and the validation folds mixed
+  product shift with layout shift. Fixed by varying product on `i // len(layouts)`,
+  with a test that every claim form template has both products.
+* **Threshold rule collapsed to 0.05** after that fix, because validation
+  then had no mistakes, which would have turned the fallback off. Added a
+  0.40 floor (twice the uniform probability). Decided from validation
+  output, not test output.
+* Smaller reviewer items fixed: the per-class floor of 150 is now enforced
+  after deduplication, an `assert` became a raised error, held-out layouts
+  are stored in metadata instead of parsed from ids, and the hosted latency
+  estimate no longer adds measured fake time to an assumed figure.
+
+Review findings not acted on, and why:
+
+* **Hybrid keeps failing when the fallback fails**, even if the model had it
+  right (49 documents here). Changing that is a design change beyond the
+  spec; the README reports it and the recommendation proposes it.
+* **No per-document confidence or fallback flag in the trace.** Would need a
+  schema change; listed as a limitation.
+* **sklearn imported in llm mode.** The model file is still loaded lazily; the
+  import cost is accepted.
