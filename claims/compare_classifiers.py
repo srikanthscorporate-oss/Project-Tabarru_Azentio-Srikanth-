@@ -99,8 +99,9 @@ def evaluate(name: str, rows: list[dict], config: ClassifierConfig) -> dict:
             "measured_with": "FakeProvider in process; not representative of a hosted LLM",
             "includes": "trained prediction, fallback prompt build, provider call, "
             "JSON parse and schema validation, retries",
-            "estimated_hosted_mean_ms_per_doc": round(
-                mean_ms + call_rate * a["hosted_latency_ms_per_call"], 1
+            # assumption only: classification LLM calls per doc x assumed per-call latency
+            "estimated_hosted_llm_ms_per_doc": round(
+                call_rate * a["hosted_latency_ms_per_call"], 1
             ),
         },
         "option": name,
@@ -112,8 +113,7 @@ def compare(model_path: Path) -> dict:
     model = TrainedModel.load(model_path)
     load_ms = (time.perf_counter_ns() - load_started) / 1e6
     meta = model.metadata
-    layouts = sorted({int(t.rsplit(".t", 1)[1]) for t in meta["heldout_template_ids"]})
-    rows = classifier_dataset(meta["test_seed"], meta["test_per_class"], layouts)
+    rows = classifier_dataset(meta["test_seed"], meta["test_per_class"], meta["heldout_layouts"])
     threshold = float(meta["threshold"])
     options = [
         evaluate("trained", rows, ClassifierConfig("trained", model, threshold)),
@@ -130,7 +130,7 @@ def compare(model_path: Path) -> dict:
             "train_template_ids": meta["train_template_ids"],
             "heldout_template_ids": meta["heldout_template_ids"],
         },
-        "hybrid_threshold": threshold,
+        "hybrid_threshold": threshold,  # from the model; CLAIMS_HYBRID_THRESHOLD is not read here
         "threshold_rule": meta.get("threshold_rule"),
         "model": {
             "artifact": str(model_path),
@@ -147,7 +147,7 @@ def compare(model_path: Path) -> dict:
 def print_table(report: dict) -> None:
     print(
         f"{'option':<8} {'accuracy':>8} {'macro_f1':>8} {'failed':>6} "
-        f"{'calls/1k docs':>13} {'usd/1k claims':>13} {'local ms/doc':>12} {'est hosted ms':>13}"
+        f"{'calls/1k docs':>13} {'usd/1k claims':>13} {'local ms/doc':>12} {'est LLM ms':>13}"
     )
     for o in report["options"]:
         q, t = o["quality"], o["timing"]
@@ -155,7 +155,7 @@ def print_table(report: dict) -> None:
             f"{o['option']:<8} {q['accuracy']:>8.4f} {q['macro_f1']:>8.4f} "
             f"{q['failed_classifications']:>6} {q['llm_calls_per_1000_docs']:>13.1f} "
             f"{q['estimated_cost_usd_per_1000_claims']:>13.4f} "
-            f"{t['measured_mean_ms_per_doc']:>12.4f} {t['estimated_hosted_mean_ms_per_doc']:>13.1f}"
+            f"{t['measured_mean_ms_per_doc']:>12.4f} {t['estimated_hosted_llm_ms_per_doc']:>13.1f}"
         )
 
 

@@ -16,6 +16,7 @@ import math
 import platform
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 import joblib
@@ -35,6 +36,9 @@ TEST_SEED = 2602
 TRAIN_LAYOUTS = [0, 1]
 HELDOUT_LAYOUTS = [2]
 TRAIN_PER_CLASS = 200
+# Twice the 0.20 probability of a uniform guess over five classes.
+THRESHOLD_FLOOR = 0.40
+MIN_PER_CLASS = 150  # assignment floor; smaller --per-class values are for quick tests
 TEST_PER_CLASS = 100
 
 
@@ -65,7 +69,9 @@ def choose_threshold(rows: list[dict]) -> float:
     Leave one training layout out: fit on one layout, predict the other, both
     ways round. This imitates meeting an unseen layout. The threshold is the
     smallest multiple of 0.05 strictly above the most confident wrong
-    validation prediction, so every validation mistake would have gone to the LLM.
+    validation prediction, so every validation mistake would have gone to the LLM,
+    and never below THRESHOLD_FLOOR, so a validation run with no mistakes does
+    not switch the LLM fallback off.
     """
     worst = 0.0
     for held in TRAIN_LAYOUTS:
@@ -76,7 +82,7 @@ def choose_threshold(rows: list[dict]) -> float:
             doc_type, confidence = model.predict(row["text"])
             if doc_type.value != row["doc_type"]:
                 worst = max(worst, confidence)
-    return min(round(math.floor(worst / 0.05 + 1) * 0.05, 2), 1.0)
+    return min(max(round(math.floor(worst / 0.05 + 1) * 0.05, 2), THRESHOLD_FLOOR), 1.0)
 
 
 def train(train: list[dict], metadata: dict) -> TrainedModel:
@@ -97,7 +103,11 @@ def main(argv: list[str] | None = None) -> int:
     # Deduplicate within training so a repeated text is not weighted twice.
     train_set = list({r["text"]: r for r in train_set}.values())
     check_split(train_set, test_rows())
-    assert len(TRAIN_LAYOUTS) + len(HELDOUT_LAYOUTS) == LAYOUTS_PER_TYPE
+    if len(TRAIN_LAYOUTS) + len(HELDOUT_LAYOUTS) != LAYOUTS_PER_TYPE:
+        raise ValueError("every layout must be either training or held out")
+    per_class = Counter(r["doc_type"] for r in train_set)
+    if args.per_class >= MIN_PER_CLASS and min(per_class.values()) < MIN_PER_CLASS:
+        raise ValueError(f"fewer than {MIN_PER_CLASS} unique training documents in a class")
 
     metadata = {
         "train_seed": TRAIN_SEED,
@@ -107,11 +117,12 @@ def main(argv: list[str] | None = None) -> int:
         "train_size": len(train_set),
         "train_template_ids": template_ids(TRAIN_LAYOUTS),
         "heldout_template_ids": template_ids(HELDOUT_LAYOUTS),
+        "heldout_layouts": HELDOUT_LAYOUTS,
         "settings": {k: {n: list(v) if isinstance(v, tuple) else v for n, v in s.items()}
                      for k, s in MODEL_SETTINGS.items()},
         "threshold": choose_threshold(train_set),
-        "threshold_rule": "smallest 0.05 step above the most confident wrong prediction "
-        "in leave-one-training-layout-out validation",
+        "threshold_rule": "max(0.40, smallest 0.05 step above the most confident wrong "
+        "prediction in leave-one-training-layout-out validation)",
         "versions": {
             "python": platform.python_version(),
             "scikit-learn": sklearn.__version__,
