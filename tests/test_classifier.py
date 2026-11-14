@@ -386,3 +386,28 @@ def test_report_quality_is_deterministic(model_path, report, tmp_path):
 def test_compare_without_model_fails_clearly(tmp_path, capsys):
     assert compare_main(["--out", str(tmp_path), "--model", str(tmp_path / "none.joblib")]) == 1
     assert "train_classifier" in capsys.readouterr().err
+
+
+def test_api_uses_classifier_from_env(monkeypatch, model_path, dataset, labels, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from claims.api import create_app
+
+    monkeypatch.setenv("CLAIMS_CLASSIFIER", "trained")
+    monkeypatch.setenv("CLAIMS_CLASSIFIER_MODEL", str(model_path))
+    app = create_app(tmp_path / "t3.db", dataset / "policies.jsonl", FakeProvider())
+    label = first_label(labels, "clean", "MEDICAL")
+    docs = [d.model_dump() for d in load_packet(dataset, label["claim_id"])]
+    assert (
+        TestClient(app)
+        .post("/v1/claims", json={"claim_id": label["claim_id"], "documents": docs})
+        .status_code
+        == 201
+    )
+    detail = TestClient(app).get(f"/v1/claims/{label['claim_id']}").json()
+    assert detail["trace"][0]["step"] == "classify_documents"
+    assert detail["trace"][0]["provider_calls"] == 0
+
+    monkeypatch.setenv("CLAIMS_CLASSIFIER", "bogus")
+    with pytest.raises(ClassifierConfigError):
+        create_app(tmp_path / "t4.db", dataset / "policies.jsonl", FakeProvider())
