@@ -75,3 +75,19 @@ def test_unreachable_real_provider_fails_documents_without_fallback(dataset, lab
 def test_code_fence_is_stripped():
     assert _strip_code_fence('```json\n{"a": 1}\n```') == '{"a": 1}'
     assert _strip_code_fence('{"a": 1}') == '{"a": 1}'
+
+
+@pytest.mark.parametrize("scenario", ["clean", "amount_mismatch", "missing_document"])
+def test_cli_output_equals_api_post_response(dataset, labels, capsys, tmp_path, scenario):
+    from fastapi.testclient import TestClient
+
+    from claims.api import create_app
+
+    label = first_label(labels, scenario)
+    assert run_cli(dataset, label["claim_id"]) == 0
+    cli_out = json.loads(capsys.readouterr().out)
+
+    client = TestClient(create_app(tmp_path / "p.db", dataset / "policies.jsonl"))
+    docs = load_packet(dataset, label["claim_id"])
+    body = {"claim_id": label["claim_id"], "documents": [d.model_dump() for d in docs]}
+    assert client.post("/v1/claims", json=body).json() == cli_out
