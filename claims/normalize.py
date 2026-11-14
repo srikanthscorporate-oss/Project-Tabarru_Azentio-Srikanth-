@@ -81,8 +81,13 @@ def to_money(value: Decimal) -> Decimal:
     return value.quantize(CENT, rounding=ROUND_HALF_UP)
 
 
+# Separators seen in OCR output and free text: hyphen, en dash, dot, underscore,
+# slash or spaces, optionally padded with spaces. Also 4-4-4 grouping. Only a
+# digit (not a letter) may precede, so "CLM900101145678" is still caught.
+_D = "[0-9OoIl]"
+_SEP = r"(?:\s*[-\u2013._/]\s*|\s+)?"
 _IC_PATTERN = re.compile(
-    r"(?<![0-9A-Za-z])[0-9OoIl]{6}[-. ]?[0-9OoIl]{2}[-. ]?([0-9OoIl]{4})(?![0-9A-Za-z])"
+    rf"(?<![0-9])(?:{_D}{{6}}{_SEP}{_D}{{2}}{_SEP}|{_D}{{4}}{_SEP}{_D}{{4}}{_SEP})({_D}{{4}})(?![0-9])"
 )
 
 
