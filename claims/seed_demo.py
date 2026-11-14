@@ -1,11 +1,11 @@
-"""Fill a demo database by sending generated packets through the real API.
+"""Fill a demo database by running generated packets through the real pipeline.
 
     python -m claims.seed_demo --data data/ --db data/demo.db
 
-Every packet in <data>/claims/ is POSTed to an in-process app that always uses
-FakeProvider, so seeding never calls a real model. Claims already in the
-database are skipped (the API answers 409), so the command is safe to repeat
-and never deletes or overwrites existing rows. The dataset itself is only read;
+Every packet in <data>/claims/ goes through the same steps as POST /v1/claims
+(assess_claim, then ClaimStore.save) with FakeProvider fixed, so seeding never
+calls a real model. Claims already in the database are skipped, so the command
+is safe to repeat and never deletes or overwrites existing rows. The dataset itself is only read;
 generate it first with python -m claims.generate.
 """
 
@@ -15,32 +15,31 @@ import argparse
 import sys
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
-from claims.api import create_app
 from claims.classifier import ClassifierConfig
+from claims.coverage import CoverageContext, assess_claim
 from claims.providers import FakeProvider
+from claims.schemas import InputDocument
+from claims.storage import ClaimStore
+from claims.validation import load_register
 
 
 def seed(data_dir: Path, db_path: Path) -> dict[str, int]:
     packets = sorted(p for p in (data_dir / "claims").iterdir() if p.is_dir())
-    app = create_app(
-        db_path, data_dir / "policies.jsonl", FakeProvider(), data_dir, ClassifierConfig("llm")
-    )
+    store = ClaimStore(db_path)
+    ctx = CoverageContext.load(data_dir, load_register(data_dir / "policies.jsonl"))
+    provider, classifier = FakeProvider(), ClassifierConfig("llm")
     counts = {"created": 0, "skipped": 0}
-    with TestClient(app) as client:
-        for folder in packets:
-            docs = [
-                {"doc_id": p.stem, "text": p.read_text(encoding="utf-8")}
-                for p in sorted(folder.glob("*.txt"))
-            ]
-            response = client.post("/v1/claims", json={"claim_id": folder.name, "documents": docs})
-            if response.status_code == 201:
-                counts["created"] += 1
-            elif response.status_code == 409:
-                counts["skipped"] += 1
-            else:
-                raise RuntimeError(f"{folder.name}: HTTP {response.status_code}")
+    for folder in packets:
+        if store.exists(folder.name):
+            counts["skipped"] += 1
+            continue
+        docs = [
+            InputDocument(doc_id=p.stem, text=p.read_text(encoding="utf-8"))
+            for p in sorted(folder.glob("*.txt"))
+        ]
+        claim = assess_claim(folder.name, docs, provider, ctx, classifier)
+        store.save(claim, docs)
+        counts["created"] += 1
     return counts
 
 
