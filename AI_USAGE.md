@@ -120,3 +120,50 @@ claims. That is because the same author wrote the templates and the patterns.
 It is not a measure of extraction quality. The OpenAI-compatible adapter is
 covered by tests only for configuration and failure handling; it has not been
 run against a live model.
+
+## Task 2
+
+Prompt given to the assistant (Claude Code): implement Task 2 of the PDF in
+this repo, extending Task 1 without rewriting it; small explicit pipeline,
+stdlib sqlite3, BM25 or TF-IDF, offline tests and eval, an independent
+reviewer after implementation, honest docs.
+
+What the assistant did, in order: ran the baseline (91 tests passing), read
+the schema, provider, pipeline and storage code, extended the generator,
+added `retrieval.py`, `coverage.py`, the adjuster endpoints, the audit table
+and migration, `eval.py`, and the tests, with one small commit per step.
+
+Mistakes observed and corrected during the work:
+
+* **FakeProvider cited the wrong clause for covered motor claims.** It picked
+  the first retrieved clause containing "own damage", which was the collision
+  excess clause MTR-5.1 (its body says "own damage caused by a collision").
+  The first eval run showed citation precision 0.83 and four covered motor
+  claims citing MTR-5.1. The fix matches clause titles only; precision is now
+  1.0. This was a bug in the fake, not tuning towards the labels: the rule
+  text and expected ids did not change.
+* **Motor excess rule did not follow the wording** (found by the independent
+  reviewer, confirmed by running `calculate_payable`). The excess was waived
+  for any cause containing the substring "tree" or "flood" and charged for
+  everything else, so "collision on the street" paid in full and theft or fire
+  lost RM 500. MTR-5.1 charges it for a collision or impact only. Now a
+  whole-word collision/impact match in both the calculation and the fake, with
+  five new tests. These tests were added with the fix, not run against the old
+  code first; the reviewer's table of the old outputs is the evidence.
+
+Review findings not acted on, and why:
+
+* **Bypass wider than the spec** (DATE_ORDER_INVALID, AMOUNT_MISMATCH,
+  FIELDS_INCOMPLETE also go straight to REFER). Kept on purpose: those facts
+  are what the decision and payable depend on. Documented in the README.
+* **Decision and payable can disagree** (a PARTIALLY_COVERED decision whose
+  computed payable has no deduction). Not changed; the adjuster sees both.
+  Noted as a limitation.
+* **IC numbers written with dots** (`900101.14.5678`) are not matched by the
+  Task 1 redaction pattern. Out of Task 2 scope; noted as a limitation.
+
+Not done: no real model was run for coverage; the OpenAI-compatible adapter
+goes through the same `complete()` call and guardrails but is untested
+against a live endpoint. The one evaluation error (CLM-0038, cosmetic
+exclusion not retrieved) was left in place and reported rather than fixed by
+adjusting the query to this dataset.
